@@ -5,6 +5,14 @@ text appears wherever your caret is. No subscription, no cloud: the speech model
 (NVIDIA Parakeet TDT 0.6B v3) runs on your machine and the optional clean-up LLM runs on
 your GPU.
 
+> **Not open source.** Copyright (c) 2026 Arnab Arya, all rights reserved. The source is here
+> to read; it is not licensed for reuse. The installer on the Releases page may be downloaded
+> and run for personal use. See [LICENSE](LICENSE).
+
+**Download:** the installer is on the [Releases](../../releases) page. It installs for your user
+only, with no administrator prompt, and downloads its speech and clean-up models (several
+gigabytes) on first run.
+
 * [docs/ROADMAP.md](docs/ROADMAP.md): the phased plan to a polished product
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): current design and rationale
 * [docs/FEATURE_PARITY.md](docs/FEATURE_PARITY.md): Wispr Flow feature checklist
