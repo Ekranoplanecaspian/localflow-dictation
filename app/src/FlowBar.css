@@ -1,0 +1,164 @@
+/* The flow bar. Its window is transparent, so the only thing painted is the pill itself. */
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* The window ignores the mouse anyway, but this stops any accidental text selection. */
+  user-select: none;
+  cursor: default;
+}
+
+/* The window is bigger than the bar; this centres the pill in it and keeps the empty space
+   transparent and click-through. */
+#root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-4);
+}
+
+.bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  /* With no words the waveform is the whole bar, so it sits in the middle. */
+  justify-content: center;
+  gap: var(--space-4);
+  /* One width per take: compact while listening, wide once there are words. Sizing to the
+     content would make the pill flinch on every partial. */
+  width: var(--flowbar-width);
+  max-width: 100%;
+  height: var(--flowbar-height);
+  padding: 0 var(--space-4);
+  transition:
+    width var(--motion-slow) var(--motion-ease-out),
+    border-color var(--motion-base) var(--motion-ease-out);
+  border-radius: var(--radius-pill);
+  background: var(--bar-bg);
+  border: 1px solid var(--bar-border);
+  box-shadow: var(--bar-shadow);
+  color: var(--bar-ink);
+  backdrop-filter: blur(18px) saturate(140%);
+  /* Grow in from slightly small, so appearing reads as intent rather than a popup. */
+  transform: scale(0.94);
+  opacity: 0;
+  animation: rise var(--motion-base) var(--motion-ease-out) forwards;
+}
+
+@keyframes rise {
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.wave {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: var(--flowbar-bar-max);
+  flex: none;
+  /* With a caption beside it the waveform is an indicator, not the subject, so it gives up
+     room rather than squeezing the words. */
+  transition: width var(--motion-base) var(--motion-ease-out);
+}
+
+.bar.wide {
+  width: 620px;
+  justify-content: flex-start;
+}
+
+.wave span {
+  width: 3px;
+  min-height: var(--flowbar-bar-min);
+  border-radius: var(--radius-pill);
+  background: var(--bar-wave);
+  /* No transition: the spring in FlowBar.tsx already does the smoothing, and a CSS
+     transition on top of it would fight the physics and lag behind the voice. */
+}
+
+.bar.recording .wave span {
+  background: linear-gradient(var(--bar-wave-tip), var(--bar-wave));
+}
+
+/* Transcribing: the voice is gone, so the bars stop reacting and sweep instead. */
+.bar.finishing .wave span {
+  background: var(--bar-dim);
+  animation: sweep 1.1s var(--motion-ease-in-out) infinite;
+}
+
+.bar.finishing .wave span:nth-child(3n) {
+  animation-delay: 90ms;
+}
+.bar.finishing .wave span:nth-child(3n + 1) {
+  animation-delay: 180ms;
+}
+
+@keyframes sweep {
+  0%,
+  100% {
+    background: var(--bar-dim);
+  }
+  50% {
+    background: var(--bar-wave);
+  }
+}
+
+.bar.error {
+  border-color: var(--bar-rec);
+}
+
+.bar.error .wave span {
+  background: var(--bar-rec);
+  animation: none;
+}
+
+.caption {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: 1.25;
+  color: var(--bar-ink);
+  /* One line that keeps its *end* visible: aligning right makes an overlong line overflow
+     past the start, which is then clipped and faded. Clipping the end instead would hide the
+     words that were just said, which are the only ones worth showing. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-align: right;
+  /* The fade only belongs where text is actually cut off. */
+  opacity: 0;
+  animation: fade-in var(--motion-base) var(--motion-ease-out) forwards;
+}
+
+.bar.clipped .caption {
+  mask-image: linear-gradient(to right, transparent, #000 28px);
+}
+
+@keyframes fade-in {
+  to {
+    opacity: 1;
+  }
+}
+
+/* A notice is a sentence addressed to the user, not a transcript of what they said. It has a
+   known length, so the pill hugs it instead of holding the width a dictation needs - a short
+   line stranded in the middle of a wide bar reads as a layout bug, not as a message. */
+.bar.notice {
+  width: auto;
+  justify-content: center;
+}
+
+.bar.notice .caption {
+  text-align: center;
+  color: var(--bar-ink);
+}
+
+.bar.notice .wave span {
+  animation: none;
+  opacity: 0.35;
+}

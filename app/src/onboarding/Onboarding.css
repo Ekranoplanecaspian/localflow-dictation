@@ -1,0 +1,344 @@
+/* The first-run wizard. It owns the whole window, so it is centred rather than laid out
+   against the Hub's sidebar, and it uses the same tokens so the Hub afterwards feels like the
+   same application rather than a different one. */
+
+.onboarding {
+  /* `min-height` and not `height`: on a short window the card must be reachable by scrolling
+     rather than clipped, and `align-items: center` on a fixed height would crop it at both
+     ends with no way to get at the buttons. */
+  min-height: 100vh;
+  box-sizing: border-box;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  /* A quiet wash of the accent behind the card, so the first screen is not a grey box. */
+  background-image: radial-gradient(
+    120% 90% at 50% -20%,
+    var(--accent-soft) 0%,
+    transparent 60%
+  );
+}
+
+.wizard {
+  width: min(640px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  box-shadow: 0 18px 50px rgba(27, 26, 46, 0.1);
+}
+
+/* Progress: named steps, not a bar. Five is few enough to show, and seeing "Try it" coming
+   tells the user this ends in something concrete. */
+.steps {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Each step takes the width of its own name. Equal-width columns truncated "Microphone" to
+   "Microph...", which makes a five-word progress strip look broken for no gain. */
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.steps .pip {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  transition: background var(--motion-base) var(--motion-ease-out);
+}
+
+.steps li.on {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.steps li.on .pip {
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.steps li.past .pip {
+  background: var(--accent);
+}
+
+.steps .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A fixed floor stops the card resizing between steps, which otherwise makes the buttons jump
+   under the cursor as the user moves through it. */
+.step {
+  min-height: 268px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.step h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+  letter-spacing: -0.01em;
+}
+
+.step .lede {
+  margin: 0;
+  font-size: var(--text-md);
+  line-height: var(--leading-base);
+  color: var(--ink-2);
+  max-width: 52ch;
+}
+
+.step .note {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-base);
+  color: var(--muted);
+  max-width: 56ch;
+}
+
+.points {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.points li {
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--ink-2);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--accent-soft);
+  max-width: 56ch;
+}
+
+.points b {
+  color: var(--ink);
+}
+
+.onboarding select,
+.tryout {
+  font-family: inherit;
+  font-size: var(--text-sm);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  width: 100%;
+}
+
+.tryout {
+  resize: none;
+  line-height: var(--leading-base);
+}
+
+.tryout:focus-visible,
+.onboarding select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* The microphone meter. Transformed rather than sized, so it is driven from the level event
+   without laying the page out sixty times a second. */
+.meter {
+  width: 100%;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.meter span {
+  display: block;
+  height: 100%;
+  width: 100%;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--accent);
+  border-radius: inherit;
+}
+
+.verdict {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.verdict.good {
+  color: var(--good);
+  font-weight: 600;
+}
+
+.chord-show kbd,
+.step .lede kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-2);
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.chord-show kbd {
+  font-size: var(--text-xl);
+  padding: var(--space-3) var(--space-4);
+}
+
+.onboarding .toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+
+.onboarding .toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.onboarding .toggle .track {
+  flex: none;
+  width: 36px;
+  height: 20px;
+  margin-top: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  position: relative;
+  transition: background var(--motion-base) var(--motion-ease-out);
+}
+
+.onboarding .toggle .track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  transition: transform var(--motion-base) var(--motion-ease-out);
+}
+
+.onboarding .toggle input:checked + .track {
+  background: var(--accent);
+}
+
+.onboarding .toggle input:checked + .track::after {
+  transform: translateX(16px);
+}
+
+.onboarding .toggle input:focus-visible + .track {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.onboarding .toggle .text {
+  font-size: var(--text-sm);
+  color: var(--ink);
+  display: grid;
+  gap: 2px;
+}
+
+.onboarding .toggle i {
+  font-style: normal;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--line-2);
+  padding-top: var(--space-4);
+}
+
+.nav .spacer {
+  flex: 1 1 auto;
+}
+
+.onboarding button {
+  font-family: inherit;
+  font-size: var(--text-sm);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition:
+    background var(--motion-fast) var(--motion-ease-out),
+    border-color var(--motion-fast) var(--motion-ease-out);
+}
+
+.onboarding button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.onboarding .primary {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.onboarding .primary:hover:not(:disabled) {
+  background: var(--accent-ink);
+}
+
+.onboarding .ghost {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.onboarding .ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+/* Skip is deliberately the quietest thing on the screen, but it is on every step: a wizard you
+   cannot leave is worse than no wizard. */
+.onboarding .quiet {
+  background: transparent;
+  color: var(--muted);
+}
+
+.onboarding .quiet:hover:not(:disabled) {
+  color: var(--ink-2);
+}
+
+.onboarding button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  engine:
+    name: engine (pytest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: engine/pyproject.toml
+      - name: Install engine
+        run: python -m pip install -e "./engine[dev]"
+      - name: Unit tests
+        working-directory: engine
+        run: python -m pytest -q
+      - name: Tokens generator is in sync
+        run: |
+          python design/build_tokens.py
+          git diff --exit-code -- app/src/styles/tokens.css
+
+  app:
+    name: app (vite + cargo check)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: Install
+        working-directory: app
+        run: npm ci
+      - name: Typecheck and build frontend
+        working-directory: app
+        run: npm run build
+      - name: Cargo check
+        working-directory: app/src-tauri
+        run: cargo check
+      - name: Shell unit tests
+        working-directory: app/src-tauri
+        run: cargo test --lib

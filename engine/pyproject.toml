@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localflow"
+version = "0.1.0"
+description = "Local, private push-to-talk dictation for Windows (Wispr Flow style)."
+requires-python = ">=3.11"
+# The engine owns the models and nothing else. The keyboard hook, the tray icon, the overlay
+# and text injection moved to the Rust shell, and their dependencies went with them: pynput,
+# pywin32, pystray and pillow are all gone. `sounddevice` stays because the benchmark harness
+# still records the own-voice set from a microphone.
+dependencies = [
+    "numpy>=1.26",
+    "sounddevice>=0.5",
+    "onnx-asr[hub]>=0.11",
+    "onnxruntime>=1.20",
+    "websockets>=13",
+    "jellyfish>=1.0",  # phonetic matching for the personal dictionary
+]
+
+[project.optional-dependencies]
+# Speech on the GPU: pip uninstall onnxruntime; pip install -e ".[gpu]"   (stt.device = "auto" picks it up)
+# onnxruntime-gpu 1.29 is a CUDA 13 build; CUDA 13 dropped the -cuNN suffix on the component wheels.
+gpu = [
+    "onnxruntime-gpu>=1.29",
+    "nvidia-cuda-runtime>=13",
+    "nvidia-cuda-nvrtc>=13",
+    "nvidia-nvjitlink>=13",
+    "nvidia-cublas>=13",
+    "nvidia-cufft>=12",
+    "nvidia-curand>=10",
+    "nvidia-cudnn-cu13>=9",
+]
+# Experimental fp16 encoder conversion (stt.precision = "fp16")
+fp16 = ["onnx>=1.17", "onnxconverter-common>=1.14"]
+# Cloud clean-up providers (postprocess.llm_provider = "anthropic")
+cloud = ["anthropic>=0.40"]
+# Multilingual fallback backend (99 languages): pip install -e ".[whisper]"
+whisper = ["faster-whisper>=1.1"]
+# Tests + the benchmark harness (`localflow bench`)
+dev = ["pytest>=8", "soundfile>=0.12", "psutil>=5.9"]
+# Freezing the engine into `localflow-engine.exe` so it runs without a virtualenv.
+package = ["pyinstaller>=6.10"]
+
+[project.scripts]
+localflow = "localflow.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

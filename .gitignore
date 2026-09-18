@@ -1,0 +1,32 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# benchmark data and results (regenerate with `localflow bench fetch` / `record`)
+engine/bench/data/
+engine/bench/results/
+
+# app
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+
+# models
+models/
+*.onnx
+*.gguf
+
+# audio: never commit recordings, except the tiny synthetic test fixture
+*.wav
+!engine/tests/fixtures/*.wav
+
+# misc
+*.log
+.DS_Store
+Thumbs.db

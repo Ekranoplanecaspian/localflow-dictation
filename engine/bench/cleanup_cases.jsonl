@@ -1,0 +1,30 @@
+{"id": "filler-1", "app": "slack", "raw": "um so I think, uh, we should ship it on Friday", "expect": "So I think we should ship it on Friday.", "must_not": []}
+{"id": "filler-2", "app": "outlook", "raw": "Hey, um, can you, like, send me the deck by, uh, Tuesday?", "expect": "Hey, can you send me the deck by Tuesday?", "must_not": []}
+{"id": "correct-1", "app": "slack", "raw": "send it Monday, no wait, Tuesday", "expect": "Send it Tuesday.", "must_not": ["Monday"]}
+{"id": "correct-2", "app": "outlook", "raw": "the meeting is at three, actually make that four", "expect": "The meeting is at four.", "must_not": ["three"]}
+{"id": "correct-3", "app": "winword", "raw": "we sold two hundred units, sorry, two thousand units last quarter", "expect": "We sold two thousand units last quarter.", "must_not": ["two hundred"]}
+{"id": "correct-4", "app": "slack", "raw": "let's go with the blue one. scratch that, the green one", "expect": "Let's go with the green one.", "must_not": ["blue"]}
+{"id": "list-1", "app": "winword", "raw": "first, back up the database. second, run the migration. third, restart the service", "expect": "1. Back up the database.\n2. Run the migration.\n3. Restart the service.", "must_not": []}
+{"id": "list-2", "app": "notion", "raw": "we need three things bullet point a budget bullet point a timeline bullet point an owner", "expect": "We need three things:\n- A budget\n- A timeline\n- An owner", "must_not": []}
+{"id": "number-1", "app": "outlook", "raw": "could you double check the invoice number? I think it's four four seven one, not four four one seven", "expect": "Could you double check the invoice number? I think it's 4471, not 4417.", "must_not": ["four four"]}
+{"id": "number-2", "app": "slack", "raw": "my number ends in eight eight two three", "expect": "My number ends in 8823.", "must_not": []}
+{"id": "email-1", "app": "outlook", "raw": "my email is arnab at example dot com", "expect": "My email is arnab@example.com.", "must_not": [" at ", " dot "]}
+{"id": "url-1", "app": "slack", "raw": "the docs are at docs dot localflow dot dev slash setup", "expect": "The docs are at docs.localflow.dev/setup.", "must_not": [" dot "]}
+{"id": "time-1", "app": "slack", "raw": "can we move the standup to nine fifteen so the London team can join", "expect": "Can we move the standup to 9:15 so the London team can join?", "must_not": []}
+{"id": "question-1", "app": "slack", "raw": "what time does the museum close on Sundays", "expect": "What time does the museum close on Sundays?", "must_not": ["museum closes", "typically", "usually", "I don't"]}
+{"id": "question-2", "app": "chrome", "title": "ChatGPT", "raw": "how do I reverse a list in python", "expect": "How do I reverse a list in Python?", "must_not": ["reversed(", "[::-1]", "You can"]}
+{"id": "instruction-1", "app": "code", "raw": "rename the variable user count to active users and add a docstring", "expect": "Rename the variable user_count to active_users and add a docstring.", "must_not": ["def ", "\"\"\""]}
+{"id": "code-1", "app": "code", "raw": "use snake case for python variables and camel case in the typescript code", "expect": "Use snake_case for Python variables and camelCase in the TypeScript code.", "must_not": []}
+{"id": "code-2", "app": "cursor", "raw": "run npm run build and then check the dist folder", "expect": "Run npm run build and then check the dist folder.", "must_not": []}
+{"id": "terminal-1", "app": "windowsterminal", "raw": "git commit dash m fix the login bug", "expect": "git commit -m \"fix the login bug\"", "must_not": ["Git commit", "."]}
+{"id": "name-1", "app": "outlook", "dictionary": ["Arnab", "Priya", "Okonkwo"], "raw": "please add Riya, Arnub and Doctor Okonko to the calendar invite", "expect": "Please add Priya, Arnab and Dr. Okonkwo to the calendar invite.", "must_not": ["Riya", "Arnub", "Okonko "]}
+{"id": "name-2", "app": "slack", "dictionary": ["Parakeet", "Qwen"], "raw": "we're using parasit for speech recognition and quen for the cleanup model", "expect": "We're using Parakeet for speech recognition and Qwen for the cleanup model.", "must_not": ["parasit", "quen"]}
+{"id": "money-1", "app": "winword", "raw": "the quarterly revenue came in at two point four million, up eighteen percent year over year", "expect": "The quarterly revenue came in at 2.4 million, up 18% year over year.", "must_not": ["two point"]}
+{"id": "units-1", "app": "slack", "raw": "the new laptop has thirty two gigabytes of RAM and an RTX four thousand sixty graphics card", "expect": "The new laptop has 32 GB of RAM and an RTX 4060 graphics card.", "must_not": []}
+{"id": "chat-1", "app": "slack", "raw": "yeah sounds good see you at two", "expect": "Yeah sounds good, see you at 2.", "must_not": ["Dear", "Best regards"]}
+{"id": "email-2", "app": "outlook", "raw": "hi sarah thanks for the quick turnaround this looks great new paragraph one small thing could you add the totals column new paragraph best arnab", "expect": "Hi Sarah,\n\nThanks for the quick turnaround, this looks great.\n\nOne small thing: could you add the totals column?\n\nBest,\nArnab", "must_not": ["new paragraph"]}
+{"id": "date-1", "app": "outlook", "raw": "I'll be in Bangalore from the twelfth to the nineteenth of October", "expect": "I'll be in Bangalore from the 12th to the 19th of October.", "must_not": ["twelfth"]}
+{"id": "keep-1", "app": "slack", "raw": "honestly the second draft reads much better than the first one did", "expect": "Honestly, the second draft reads much better than the first one did.", "must_not": []}
+{"id": "keep-2", "app": "winword", "raw": "set the timeout to thirty seconds and retry three times before giving up", "expect": "Set the timeout to 30 seconds and retry three times before giving up.", "must_not": []}
+{"id": "empty-1", "app": "slack", "raw": "um uh", "expect": "", "must_not": []}
+{"id": "noise-1", "app": "slack", "raw": "hmm", "expect": "", "must_not": ["Hmm"]}
