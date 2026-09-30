@@ -193,3 +193,16 @@ def test_output_that_hit_the_cap_is_rejected_rather_than_used():
     assert result.llm_rejected == "truncated"
     assert not result.used_llm
     assert result.text == result.rules_text
+
+
+def test_fillers_go_but_the_same_letters_meaning_something_stay():
+    """"ER" and "mm" were removed as hesitations: "take him to the ER" lost its last word and
+    "a 5 mm screw" became "a 5 screw"."""
+    from localflow.cleanup.pipeline import CleanupPipeline
+    from localflow.config import PostProcessConfig
+
+    rules = CleanupPipeline(PostProcessConfig(llm_cleanup=False)).rules
+    assert rules("um so I think, uh, we should er ship it") == "So I think, we should ship it"
+    assert rules("Er, hmm, take him to the ER now") == "Take him to the ER now"
+    assert rules("use a 5 mm screw and a 12mm bolt, mm, maybe") == "Use a 5 mm screw and a 12mm bolt, maybe"
+    assert rules("the UM campus") == "The UM campus"

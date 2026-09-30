@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -19,17 +19,17 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["image-png", "tray-icon"] }
-tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", default-features = false, features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time"] }
 tokio-tungstenite = "0.30.0"
 futures-util = "0.3.34"
 anyhow = "1.0.104"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_System_Variant", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_SystemInformation"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Com", "Win32_System_Ole", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Kernel", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_System_Variant", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_Security", "Win32_Graphics_Dwm", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_System_RemoteDesktop", "Win32_System_StationsAndDesktops"] }
 windows-core = "0.100.0"
 cpal = "0.18.2"
 tauri-plugin-notification = "2.4.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -37,5 +37,9 @@ tauri-plugin-notification = "2.4.0"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
-strip = true
+# Unwind, not abort: a panic in a worker thread is caught and the worker restarted
+# (src/guard.rs). Aborting took the whole app down with it, microphone and hotkey included.
+panic = "unwind"
+# The MSVC linker keeps symbols in a separate .pdb, never in the .exe, so this costs the
+# installer nothing - and a panic backtrace logged next to that .pdb names its functions.
+strip = false

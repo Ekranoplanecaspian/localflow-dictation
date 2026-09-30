@@ -39,6 +39,7 @@ class EngineProcess:
         self.proc: subprocess.Popen | None = None
         self.port: int | None = None
         self.token: str | None = None
+        self.pid: int | None = None  # the engine's own, from the handshake (a launcher may sit in between)
         self.log_level = log_level
 
     def start(self, timeout: float = 30.0) -> tuple[int, str]:
@@ -63,6 +64,7 @@ class EngineProcess:
             try:
                 info = json.loads(line)
                 self.port, self.token = int(info["port"]), str(info["token"])
+                self.pid = info.get("pid")
                 return self.port, self.token
             except (ValueError, KeyError):
                 continue
@@ -72,12 +74,27 @@ class EngineProcess:
         return self.proc is not None and self.proc.poll() is None
 
     def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
+        """Stop the engine and everything it started. Terminating the process we spawned was not
+        enough: in development that is the virtualenv's launcher, and the engine under it - with
+        its clean-up server holding graphics memory - ran on until this process exited."""
+        if not (self.proc and self.proc.poll() is None):
+            return
+        try:
+            import psutil
+
+            family = psutil.Process(self.proc.pid).children(recursive=True)
+        except Exception:
+            family = []
+        try:
+            self.proc.terminate()
+            self.proc.wait(5)
+        except Exception:
+            self.proc.kill()
+        for p in family:
             try:
-                self.proc.terminate()
-                self.proc.wait(5)
+                p.kill()
             except Exception:
-                self.proc.kill()
+                pass
 
 
 def _pid_alive(pid: int) -> bool:

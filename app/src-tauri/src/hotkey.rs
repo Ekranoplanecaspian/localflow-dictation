@@ -31,6 +31,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KBDLLHOOKSTRUCT_FLAGS, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
+use crate::guard::LockExt;
+
 /// A key Windows does not use, injected to break up a lone Win tap.
 const VK_UNASSIGNED: u16 = 0x07;
 const WM_REHOOK: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -94,8 +96,10 @@ pub fn parse_key(name: &str) -> Option<u16> {
 // ---------------------------------------------------------------------------------------------
 // what the hook tells the controller
 
+/// What the hook reports. Visible to the crate for the end-to-end harness, which stands in
+/// for the hook and drives the controller - the chord policy - directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Raw {
+pub(crate) enum Raw {
     ChordDown,
     ChordUp,
     /// The command-mode chord, which is a different chord entirely rather than a modifier on
@@ -103,6 +107,13 @@ enum Raw {
     CommandDown,
     CommandUp,
     Escape,
+    /// Win+Alt+V: paste the last dictation. True when it cut short a command take the Win+Alt
+    /// of it had started (the default command chord is Win+Alt).
+    PasteLast(bool),
+    /// The keyboard went where the hook cannot follow - the lock screen, a UAC prompt, sleep -
+    /// so the chord's release will never be seen: end the take (its words are kept) and forget
+    /// every key the hook thought was held.
+    Interrupted,
 }
 
 /// What the controller decides the user meant.
@@ -119,6 +130,8 @@ pub enum Action {
     /// Begin a command-mode take: the words spoken are an instruction for the selected text,
     /// not something to type.
     StartCommand,
+    /// Paste the last dictation into whatever is in front.
+    PasteLast,
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +269,12 @@ struct HookState {
     /// Every event the callback saw, injected ones included. The watchdog's liveness probe
     /// works by making this number move.
     events_seen: AtomicU64,
+    /// The controller's options, read on every event so a change in the Hub applies at once.
+    /// They used to be copied when the hook was installed, and the Hub's "saved" meant "after
+    /// the next restart".
+    double_tap: AtomicBool,
+    double_tap_ms: AtomicU64,
+    escape_cancels: AtomicBool,
 }
 
 fn state() -> &'static HookState {
@@ -274,12 +293,26 @@ fn state() -> &'static HookState {
         recording: AtomicBool::new(false),
         hands_free: AtomicBool::new(false),
         events_seen: AtomicU64::new(0),
+        double_tap: AtomicBool::new(Config::default().double_tap),
+        double_tap_ms: AtomicU64::new(Config::default().double_tap_ms),
+        escape_cancels: AtomicBool::new(Config::default().escape_cancels),
         };
         for vk in Config::default().chord {
             mask_set(&st.chord, vk, true);
         }
         st
     })
+}
+
+/// Apply hotkey settings to the running hook: both chords and every option the controller
+/// reads. Lock free, so it takes effect on the very next key event.
+pub fn configure(cfg: &Config) {
+    set_chord(&cfg.chord);
+    set_command_chord(&cfg.command_chord);
+    let st = state();
+    st.double_tap.store(cfg.double_tap, Ordering::Relaxed);
+    st.double_tap_ms.store(cfg.double_tap_ms, Ordering::Relaxed);
+    st.escape_cancels.store(cfg.escape_cancels, Ordering::Relaxed);
 }
 
 /// Replace the chord. Cheap and lock free, so it can be changed while the hook is running.
@@ -306,6 +339,34 @@ pub fn set_recording(on: bool) {
     state().recording.store(on, Ordering::Relaxed);
 }
 
+/// The session was locked, the machine went to sleep, or input moved to another desktop (a UAC
+/// prompt, Ctrl+Alt+Del): the hook sees none of the key releases that happen there. End the
+/// take being spoken, as letting go would have, and forget every key thought to be held - left
+/// set, the chord would read as still down, and the next press as a release.
+pub fn interrupted() {
+    forget_held_keys();
+    send(Raw::Interrupted);
+}
+
+/// Back from the lock screen, sleep or another desktop: keys pressed and released there were
+/// never seen, so nothing may be thought held now.
+pub fn forget_held_keys() {
+    let st = state();
+    mask_clear(&st.held);
+    st.active.store(false, Ordering::SeqCst);
+    st.command_active.store(false, Ordering::SeqCst);
+}
+
+/// Put the hook in again (after sleep, when Windows may have dropped it without a word).
+pub fn reinstall() {
+    let tid = state().thread_id.load(Ordering::SeqCst);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_REHOOK, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Forget that a take was latched. Called when something other than the user's chord ended it,
 /// so the next tap starts a new take rather than being read as "stop".
 pub fn clear_hands_free() {
@@ -313,49 +374,66 @@ pub fn clear_hands_free() {
 }
 
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let st = state();
     if code >= 0 {
-        let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        st.last_event_tick.store(info.time, Ordering::Relaxed);
-        st.events_seen.fetch_add(1, Ordering::Relaxed);
-        // Our own injected typing must never look like the user pressing the chord.
-        if info.flags & LLKHF_INJECTED != KBDLLHOOKSTRUCT_FLAGS(0) {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-        let vk = canonical(info.vkCode as u16);
-        let msg = wparam.0 as u32;
-        let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-        let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-
-        if down || up {
-            mask_set(&st.held, vk, down);
-            // Command mode is tested first. The two chords are guaranteed not to nest (see
-            // `Settings::command_chord`), so at most one of them can be complete, but testing
-            // in a fixed order keeps that guarantee from mattering to the hook.
-            if down
-                && chord_complete(&st.command_chord, &st.held)
-                && !st.command_active.swap(true, Ordering::SeqCst)
-            {
-                send(Raw::CommandDown);
-            } else if up
-                && mask_has(&st.command_chord, vk)
-                && st.command_active.swap(false, Ordering::SeqCst)
-            {
-                send(Raw::CommandUp);
-            } else if down && chord_complete(&st.chord, &st.held) && !st.active.swap(true, Ordering::SeqCst) {
-                send(Raw::ChordDown);
-            } else if up && mask_has(&st.chord, vk) && st.active.swap(false, Ordering::SeqCst) {
-                send(Raw::ChordUp);
-            } else if down && vk == 0x1B && st.recording.load(Ordering::Relaxed) {
-                send(Raw::Escape);
-            }
-        }
+        // A panic cannot unwind out of a callback Windows made: it would end the whole process.
+        // Caught, it is logged and costs one key event.
+        let _ = std::panic::catch_unwind(|| observe(wparam, lparam));
     }
     CallNextHookEx(None, code, wparam, lparam)
 }
 
+/// # Safety
+/// Only from `keyboard_proc` with a non-negative code, when `lparam` points at the event.
+unsafe fn observe(wparam: WPARAM, lparam: LPARAM) {
+    let st = state();
+    let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    st.last_event_tick.store(info.time, Ordering::Relaxed);
+    st.events_seen.fetch_add(1, Ordering::Relaxed);
+    // Our own injected typing must never look like the user pressing the chord.
+    if info.flags & LLKHF_INJECTED != KBDLLHOOKSTRUCT_FLAGS(0) {
+        return;
+    }
+    let vk = canonical(info.vkCode as u16);
+    let msg = wparam.0 as u32;
+    let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+    let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+
+    if down || up {
+        mask_set(&st.held, vk, down);
+        // Command mode is tested first. The two chords are guaranteed not to nest (see
+        // `Settings::command_chord`), so at most one of them can be complete, but testing
+        // in a fixed order keeps that guarantee from mattering to the hook.
+        if down
+            && chord_complete(&st.command_chord, &st.held)
+            && !st.command_active.swap(true, Ordering::SeqCst)
+        {
+            send(Raw::CommandDown);
+        } else if up
+            && mask_has(&st.command_chord, vk)
+            && st.command_active.swap(false, Ordering::SeqCst)
+        {
+            send(Raw::CommandUp);
+        } else if down && chord_complete(&st.chord, &st.held) && !st.active.swap(true, Ordering::SeqCst) {
+            send(Raw::ChordDown);
+        } else if up && mask_has(&st.chord, vk) && st.active.swap(false, Ordering::SeqCst) {
+            send(Raw::ChordUp);
+        } else if down && vk == 0x1B && st.recording.load(Ordering::Relaxed) {
+            send(Raw::Escape);
+        } else if down
+            && vk == 0x56
+            && mask_has(&st.held, 0x5B)
+            && mask_has(&st.held, 0x12)
+            && !mask_has(&st.held, 0x11)
+            && !mask_has(&st.held, 0x10)
+        {
+            let cut_short = st.command_active.swap(false, Ordering::SeqCst);
+            send(Raw::PasteLast(cut_short));
+        }
+    }
+}
+
 fn send(raw: Raw) {
-    if let Some(tx) = state().tx.lock().unwrap().as_ref() {
+    if let Some(tx) = state().tx.locked().as_ref() {
         let _ = tx.send(raw);
     }
 }
@@ -395,10 +473,9 @@ impl Hotkeys {
     where
         F: Fn(Action) + Send + 'static,
     {
-        set_chord(&cfg.chord);
-        set_command_chord(&cfg.command_chord);
+        configure(&cfg);
         let (tx, rx) = mpsc::channel::<Raw>();
-        *state().tx.lock().unwrap() = Some(tx);
+        *state().tx.locked() = Some(tx);
 
         let ready = std::sync::Arc::new((Mutex::new(0u32), std::sync::Condvar::new()));
         let signal = ready.clone();
@@ -408,9 +485,10 @@ impl Hotkeys {
             .expect("hook thread");
 
         let (lock, cv) = &*ready;
-        let mut id = lock.lock().unwrap();
+        let mut id = lock.locked();
         while *id == 0 {
-            let (guard, timeout) = cv.wait_timeout(id, Duration::from_secs(5)).unwrap();
+            let (guard, timeout) =
+                cv.wait_timeout(id, Duration::from_secs(5)).unwrap_or_else(std::sync::PoisonError::into_inner);
             id = guard;
             if timeout.timed_out() {
                 break;
@@ -421,17 +499,34 @@ impl Hotkeys {
 
         std::thread::Builder::new()
             .name("hotkey-controller".into())
-            .spawn(move || controller(cfg, rx, on_action))
+            .spawn(move || controller(rx, on_action))
             .expect("controller thread");
-        std::thread::Builder::new()
-            .name("hook-watchdog".into())
-            .spawn(watchdog)
-            .expect("watchdog thread");
+        crate::guard::spawn_supervised("hook-watchdog", watchdog).expect("watchdog thread");
 
         Hotkeys { thread_id }
     }
 
+    /// The controller alone, fed by the end-to-end harness instead of the keyboard hook. Every
+    /// decision about taps, double taps, latching and Escape is the real code's.
+    pub(crate) fn scripted<F>(cfg: Config, on_action: F) -> (Hotkeys, Sender<Raw>)
+    where
+        F: Fn(Action) + Send + 'static,
+    {
+        configure(&cfg);
+        let (tx, rx) = mpsc::channel::<Raw>();
+        // So `interrupted` reaches this controller too.
+        *state().tx.locked() = Some(tx.clone());
+        std::thread::Builder::new()
+            .name("hotkey-controller".into())
+            .spawn(move || controller(rx, on_action))
+            .expect("controller thread");
+        (Hotkeys { thread_id: 0 }, tx)
+    }
+
     pub fn stop(&self) {
+        if self.thread_id == 0 {
+            return; // scripted: there is no hook thread
+        }
         unsafe {
             let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
         }
@@ -462,7 +557,7 @@ fn hook_thread(ready: std::sync::Arc<(Mutex<u32>, std::sync::Condvar)>) {
     install_hook();
     {
         let (lock, cv) = &*ready;
-        *lock.lock().unwrap() = tid;
+        *lock.locked() = tid;
         cv.notify_all();
     }
     unsafe {
@@ -486,6 +581,11 @@ fn hook_thread(ready: std::sync::Arc<(Mutex<u32>, std::sync::Condvar)>) {
             let _ = UnhookWindowsHookEx(HHOOK(old as *mut std::ffi::c_void));
         }
     }
+}
+
+/// Whether a keyboard hook is in place right now (for the status model).
+pub fn hook_installed() -> bool {
+    state().hook.load(Ordering::SeqCst) != 0
 }
 
 /// Windows removes a low-level hook whose callback timed out, without telling anyone, so the
@@ -515,7 +615,8 @@ fn watchdog() {
         if alive() {
             continue;
         }
-        crate::shell_log!("the keyboard hook stopped receiving events; reinstalling");
+        crate::shell_log!("[{}] the keyboard hook stopped receiving events; reinstalling",
+                          crate::problems::HOTKEY_HOOK_REINSTALLED.as_str());
         let tid = state().thread_id.load(Ordering::SeqCst);
         if tid != 0 {
             unsafe {
@@ -622,6 +723,104 @@ mod tests {
         assert!(!mask_has(&mask, 255));
     }
 
+    /// Run the controller over a sequence of hook events and return what it decided.
+    fn actions_for(events: &[Raw]) -> Vec<Action> {
+        // No Win in the chord: the controller would inject a real key to hold off the Start menu.
+        let cfg = Config {
+            chord: [0x11u16, 0x10].into_iter().collect(),
+            command_chord: BTreeSet::new(),
+            ..Config::default()
+        };
+        actions_with(&cfg, events)
+    }
+
+    /// The same, with the options given.
+    fn actions_with(cfg: &Config, events: &[Raw]) -> Vec<Action> {
+        // The hook's state is process-wide, and tests run in parallel.
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        configure(cfg);
+        clear_hands_free();
+        let (tx, rx) = mpsc::channel();
+        for e in events {
+            tx.send(*e).unwrap();
+        }
+        drop(tx);
+        let seen = Mutex::new(Vec::new());
+        controller(rx, |a| seen.locked().push(a));
+        clear_hands_free();
+        configure(&Config::default());
+        seen.into_inner().unwrap()
+    }
+
+    /// Locking the screen with the chord held: the release happens where the hook cannot see
+    /// it. The take ends there, and the next press is an ordinary take - not read as the second
+    /// half of a double tap, nor as a release.
+    #[test]
+    fn an_interruption_ends_the_take_and_the_next_press_starts_afresh() {
+        use Action::*;
+        use Raw::*;
+        assert_eq!(actions_for(&[ChordDown, Interrupted, ChordDown, ChordUp]), vec![Start, Stop, Start, Stop]);
+        // A hands-free take is ended too, and the next press starts a take rather than "stopping".
+        assert_eq!(
+            actions_for(&[ChordDown, ChordUp, ChordDown, Interrupted, ChordDown, ChordUp]),
+            vec![Start, Stop, StartHandsFree, Stop, Start, Stop]
+        );
+    }
+
+    /// Options changed in the Hub used to wait for a restart: the controller had copied them
+    /// when it started. It reads them on every event now.
+    #[test]
+    fn options_changed_while_running_apply_to_the_next_key() {
+        use Raw::{ChordDown as D, ChordUp as U, Escape as E};
+        let no_win: BTreeSet<u16> = [0x11u16, 0x10].into_iter().collect();
+        let base = Config { chord: no_win, command_chord: BTreeSet::new(), ..Config::default() };
+
+        let off = Config { double_tap: false, ..base.clone() };
+        assert_eq!(
+            actions_with(&off, &[D, U, D, U]),
+            vec![Action::Start, Action::Stop, Action::Start, Action::Stop],
+            "double tap turned off: two quick taps are two takes, nothing latches"
+        );
+
+        let keep_escape = Config { escape_cancels: false, ..base.clone() };
+        assert_eq!(actions_with(&keep_escape, &[D, E, U]), vec![Action::Start, Action::Stop]);
+        assert_eq!(actions_with(&base, &[D, E, U]), vec![Action::Start, Action::Cancel, Action::Stop]);
+    }
+
+    /// Stopping a latched take with a tap used to send "stop" twice - once for the press and
+    /// again for the release - and the engine typed the text twice.
+    #[test]
+    fn stopping_hands_free_with_a_tap_stops_once() {
+        use Raw::{ChordDown as D, ChordUp as U};
+        let got = actions_for(&[D, U, D, U, D, U]);
+        assert_eq!(
+            got,
+            vec![Action::Start, Action::Stop, Action::StartHandsFree, Action::Stop],
+            "tap, tap to latch, tap to stop: one stop at the end, not two"
+        );
+    }
+
+    /// The tap that stops a latched take is not the first half of a new double tap.
+    #[test]
+    fn a_quick_press_after_stopping_hands_free_is_an_ordinary_take() {
+        use Raw::{ChordDown as D, ChordUp as U};
+        let got = actions_for(&[D, U, D, U, D, U, D, U]);
+        assert_eq!(
+            got,
+            vec![Action::Start, Action::Stop, Action::StartHandsFree, Action::Stop, Action::Start, Action::Stop]
+        );
+    }
+
+    /// Win+Alt+V pastes the last dictation. With the default command chord (Win+Alt), the Win+Alt
+    /// of it has already started a command take, which it cancels first.
+    #[test]
+    fn win_alt_v_pastes_the_last_dictation_and_cuts_short_a_command_take() {
+        let got = actions_for(&[Raw::CommandDown, Raw::PasteLast(true), Raw::CommandUp]);
+        assert_eq!(got[..3], [Action::StartCommand, Action::Cancel, Action::PasteLast]);
+        assert_eq!(actions_for(&[Raw::PasteLast(false)]), vec![Action::PasteLast]);
+    }
+
     #[test]
     fn describes_a_chord_the_way_a_person_would_write_it() {
         let cfg = Config::default();
@@ -631,10 +830,12 @@ mod tests {
     }
 }
 
-fn controller<F: Fn(Action)>(cfg: Config, rx: mpsc::Receiver<Raw>, on_action: F) {
-    let double_tap = Duration::from_millis(cfg.double_tap_ms);
-    let chord_has_win = cfg.chord.contains(&0x5B);
-    let command_has_win = cfg.command_chord.contains(&0x5B);
+fn controller<F: Fn(Action)>(rx: mpsc::Receiver<Raw>, on_action: F) {
+    // An action that panics loses that one press. Unguarded it ended this thread, and with it
+    // every hotkey until the app was restarted.
+    let on_action = |action: Action| {
+        crate::guard::catch("hotkey action", || on_action(action));
+    };
     let shared = state();
     // Read back through the shared flag on every event: the hands-free watcher may have ended
     // the take from another thread while the user was not touching the keyboard.
@@ -650,12 +851,17 @@ fn controller<F: Fn(Action)>(cfg: Config, rx: mpsc::Receiver<Raw>, on_action: F)
     }
     let mut pressed_at: Option<Instant> = None;
     let mut released_at: Option<Instant> = None;
+    // The press that stopped a latched take owns its release too. Without this the release
+    // read as a second "stop" (the latch was already off by then), and the take was ended twice.
+    let mut swallow_release = false;
 
     while let Ok(raw) = rx.recv() {
         match raw {
             Raw::ChordDown => {
                 let now = Instant::now();
-                let quick_second_tap = cfg.double_tap
+                // Read now rather than at install: the Hub may have changed them since.
+                let double_tap = Duration::from_millis(shared.double_tap_ms.load(Ordering::Relaxed));
+                let quick_second_tap = shared.double_tap.load(Ordering::Relaxed)
                     && released_at.map(|r| now.duration_since(r) < double_tap).unwrap_or(false)
                     && pressed_at
                         .zip(released_at)
@@ -663,12 +869,15 @@ fn controller<F: Fn(Action)>(cfg: Config, rx: mpsc::Receiver<Raw>, on_action: F)
                         .unwrap_or(false);
                 pressed_at = Some(now);
 
-                if chord_has_win {
+                // The chord as it is now: one changed to include Win at runtime used to open
+                // the Start menu after every dictation until the app restarted.
+                if mask_has(&shared.chord, 0x5B) {
                     suppress_start_menu();
                 }
                 if hands_free!() {
                     // A press while latched means "stop".
                     set_hands_free!(false);
+                    swallow_release = true;
                     on_action(Action::Stop);
                 } else if quick_second_tap {
                     set_hands_free!(true);
@@ -678,6 +887,13 @@ fn controller<F: Fn(Action)>(cfg: Config, rx: mpsc::Receiver<Raw>, on_action: F)
                 }
             }
             Raw::ChordUp => {
+                if std::mem::take(&mut swallow_release) {
+                    // Nor is that press the first half of a double tap: a quick press after it
+                    // starts an ordinary take, rather than latching and cancelling the take
+                    // that was just stopped.
+                    released_at = None;
+                    continue;
+                }
                 released_at = Some(Instant::now());
                 if !hands_free!() {
                     on_action(Action::Stop);
@@ -686,17 +902,32 @@ fn controller<F: Fn(Action)>(cfg: Config, rx: mpsc::Receiver<Raw>, on_action: F)
             Raw::CommandDown => {
                 // Hands-free never applies here: a command is one instruction about one
                 // selection, so latching it on would only leave the bar running.
-                if command_has_win {
+                if mask_has(&shared.command_chord, 0x5B) {
                     suppress_start_menu();
                 }
                 on_action(Action::StartCommand);
             }
             Raw::CommandUp => on_action(Action::Stop),
+            Raw::PasteLast(cut_short) => {
+                if cut_short {
+                    on_action(Action::Cancel);
+                }
+                on_action(Action::PasteLast);
+            }
             Raw::Escape => {
-                if cfg.escape_cancels {
+                if shared.escape_cancels.load(Ordering::Relaxed) {
                     set_hands_free!(false);
                     on_action(Action::Cancel);
                 }
+            }
+            Raw::Interrupted => {
+                // Whatever the keys were doing, the take ends as a release would end it, and no
+                // half of a double tap carries over to the next press.
+                set_hands_free!(false);
+                swallow_release = false;
+                pressed_at = None;
+                released_at = None;
+                on_action(Action::Stop);
             }
         }
     }

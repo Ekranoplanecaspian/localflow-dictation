@@ -28,5 +28,7 @@ export default defineConfig(() => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+    // The Hub's Help page reads the problem catalogue the shell compiles in (../shared).
+    fs: { allow: [".", "../shared"] },
   },
 }));

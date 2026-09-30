@@ -14,6 +14,11 @@ use std::time::SystemTime;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn path() -> Option<PathBuf> {
+    // Unit tests log too (a caught panic, say); that belongs on the console, not in the log of
+    // the LocalFlow the developer is dictating with.
+    if cfg!(test) {
+        return None;
+    }
     let dir = crate::paths::config_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("shell.log"))
@@ -50,7 +55,15 @@ fn stamp() -> String {
     }
 }
 
+/// Whether dictated words and window titles go into the log as they are. Off unless
+/// `LOCALFLOW_LOG_WORDS=1`: a log holding every dictation is a diary nobody asked to keep (D1).
+fn keep_words() -> bool {
+    static KEEP: OnceLock<bool> = OnceLock::new();
+    *KEEP.get_or_init(|| std::env::var("LOCALFLOW_LOG_WORDS").is_ok_and(|v| v == "1"))
+}
+
 pub fn write(line: &str) {
+    let line = if keep_words() { line.to_owned() } else { crate::diagnostics::redact_shell_line(line) };
     let text = format!("{} {}\n", stamp(), line);
     // Not `eprint!`: that panics when stderr cannot be written, and a windowed process started
     // from Explorer - a shortcut, the Start menu, autostart, which is every way a user
@@ -58,11 +71,11 @@ pub fn write(line: &str) {
     // and died, and because the panic happened before the file write there was no log to say
     // so. Launched from a terminal it all worked, which is what made it so hard to see.
     let _ = std::io::stderr().write_all(text.as_bytes());
-    if let Ok(mut slot) = file().lock() {
-        if let Some(f) = slot.as_mut() {
-            let _ = f.write_all(text.as_bytes());
-            let _ = f.flush();
-        }
+    // Poisoned or not: this is how a panic gets written down, so it must never be skipped.
+    let mut slot = file().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(f) = slot.as_mut() {
+        let _ = f.write_all(text.as_bytes());
+        let _ = f.flush();
     }
 }
 

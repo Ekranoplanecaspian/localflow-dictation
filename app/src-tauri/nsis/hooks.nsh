@@ -9,24 +9,30 @@
 ; rude, and deleting them silently means an unusually expensive re-download for somebody who
 ; was only reinstalling. So the choice is put to the user, and defaults to keeping them.
 
+; Stop LocalFlow's own processes: the shell, the engine and the clean-up server, but only the
+; copies that run from the install folder or from %LOCALAPPDATA%\LocalFlow (where llama-server is
+; downloaded). Stopping them by name alone also stopped other people's programs: "app.exe" is
+; any Tauri app's default name, and LM Studio runs a llama-server.exe of its own. The folders go
+; through the environment rather than into the command, so a quote in a user name cannot break it.
+!macro LOCALFLOW_STOP_OWN_PROCESSES
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LOCALFLOW_STOP_IN", t "$INSTDIR")i'
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LOCALFLOW_STOP_DATA", t "$LOCALAPPDATA\LocalFlow")i'
+  nsExec::Exec `powershell.exe -NoProfile -NonInteractive -Command "Get-Process app,localflow-engine,llama-server -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and ($$_.Path.StartsWith($$env:LOCALFLOW_STOP_IN + '\', 'OrdinalIgnoreCase') -or $$_.Path.StartsWith($$env:LOCALFLOW_STOP_DATA + '\', 'OrdinalIgnoreCase')) } | Stop-Process -Force"`
+  Sleep 800
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ; A running copy holds its own executable open, and the engine holds a thousand files in
   ; localflow-engine\. Without this the install fails part-written, which is worse than either
   ; outcome it was choosing between.
-  nsExec::Exec 'taskkill /F /IM app.exe /T'
-  nsExec::Exec 'taskkill /F /IM localflow-engine.exe /T'
-  nsExec::Exec 'taskkill /F /IM llama-server.exe /T'
-  Sleep 800
+  !insertmacro LOCALFLOW_STOP_OWN_PROCESSES
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  nsExec::Exec 'taskkill /F /IM app.exe /T'
-  nsExec::Exec 'taskkill /F /IM localflow-engine.exe /T'
-  nsExec::Exec 'taskkill /F /IM llama-server.exe /T'
-  Sleep 800
+  !insertmacro LOCALFLOW_STOP_OWN_PROCESSES
 
   ; Start-at-sign-in. Left behind, Windows would try to launch a program that is no longer
   ; there on every single sign-in, and the user would have no obvious way to find out why.

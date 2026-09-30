@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { StatusCard, type Go } from "./Status";
 import type { Phase, SectionProps } from "./types";
 
 /** Fourteen days of dictation counts, as a small bar chart. */
@@ -34,8 +34,9 @@ export function Overview({
     partial,
     onChange,
     say,
-}: SectionProps & { phase: Phase; partial: string }) {
-    const { stats, engine, link, settings } = data;
+    go,
+}: SectionProps & { phase: Phase; partial: string; go: Go }) {
+    const { stats, link, settings } = data;
     const last = data.history[0];
     const hotkey = settings.hotkey.join(" + ").replace(/\bwin\b/i, "Win").replace(/\bctrl\b/i, "Ctrl");
 
@@ -48,6 +49,8 @@ export function Overview({
                     {settings.double_tap_hands_free && "Double-tap to keep it listening."}
                 </p>
             </header>
+
+            <StatusCard health={data.health} link={link} go={go} say={say} onChange={onChange} />
 
             <section className={`live ${phase}`}>
                 {phase === "recording" && <span className="live-text">{partial || "Listening…"}</span>}
@@ -107,42 +110,6 @@ export function Overview({
                     </ul>
                 </article>
 
-                <article className="card">
-                    <h2>Engine</h2>
-                    <div className="row">
-                        <span className="k">Speech</span>
-                        <span className="v">
-                            {engine?.stt
-                                ? `${engine.stt.state} · ${engine.stt.model ?? "?"} · ${engine.stt.device ?? "?"}`
-                                : "—"}
-                        </span>
-                    </div>
-                    <div className="row">
-                        <span className="k">Auto-edits</span>
-                        <span className="v">
-                            {engine?.llm ? `${engine.llm.state} · ${engine.llm.model ?? "?"}` : "—"}
-                        </span>
-                    </div>
-                    <div className="row">
-                        <span className="k">Process</span>
-                        <span className="v muted">
-                            {link.pid ? `pid ${link.pid}${link.attached ? " (attached)" : ""}` : "—"}
-                            {link.restarts ? ` · ${link.restarts} restarts` : ""}
-                        </span>
-                    </div>
-                    <div className="actions">
-                        <button
-                            className="ghost"
-                            onClick={async () => {
-                                await invoke("restart_engine");
-                                say("restarting the engine");
-                                window.setTimeout(onChange, 1500);
-                            }}
-                        >
-                            Restart engine
-                        </button>
-                    </div>
-                </article>
             </div>
         </>
     );

@@ -17,6 +17,24 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
+use crate::guard::LockExt;
+
+/// The microphone's last state, as announced on "audio-device". The status model listens for
+/// that event but is set up after capture has started, and a PC with no microphone at all fails
+/// at once: that one announcement was lost, and since the same error is not announced twice,
+/// the Status card said "Opening" for good (found on a clean VM in B6). The shell replays this
+/// once the status model is up (`last_device_event`).
+static LAST_DEVICE_EVENT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+fn announce_device(app: &AppHandle, payload: serde_json::Value) {
+    *LAST_DEVICE_EVENT.locked() = Some(payload.clone());
+    let _ = app.emit("audio-device", payload);
+}
+
+/// The last "audio-device" announcement, for a listener that started after it.
+pub fn last_device_event() -> Option<serde_json::Value> {
+    LAST_DEVICE_EVENT.locked().clone()
+}
 use crate::session::SessionManager;
 
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -28,6 +46,8 @@ const METER_HZ: u64 = 50;
 /// No audio for this long while a stream is supposed to be running means the device is gone
 /// (unplugged, or the machine came back from sleep with a different default).
 const SILENCE_REBUILD: Duration = Duration::from_secs(3);
+/// How often, in half-second ticks, to look for a different microphone.
+const DEVICE_CHECK_TICKS: u32 = 6;
 
 struct Shared {
     recording: AtomicBool,
@@ -49,7 +69,97 @@ pub struct Capture {
     shared: Arc<Shared>,
 }
 
+/// Speech played into the capture pipeline in place of a microphone, by the end-to-end harness.
+#[derive(Clone)]
+pub struct Tape {
+    queue: Arc<Mutex<VecDeque<i16>>>,
+    /// Set: the device has gone - no samples at all, not even silence, as when it is unplugged.
+    dead: Arc<AtomicBool>,
+}
+
+impl Tape {
+    /// Queue 16 kHz mono audio; it plays at real-time pace, after whatever is still queued.
+    pub fn play(&self, pcm: &[i16]) {
+        self.queue.locked().extend(pcm.iter().copied());
+    }
+
+    pub fn playing(&self) -> bool {
+        !self.queue.locked().is_empty()
+    }
+
+    /// Pull the plug: drop whatever was still to be said and produce nothing more.
+    pub fn unplug(&self) {
+        self.queue.locked().clear();
+        self.dead.store(true, Ordering::SeqCst);
+    }
+
+    pub fn plug_in(&self) {
+        self.dead.store(false, Ordering::SeqCst);
+    }
+}
+
+fn new_shared() -> Arc<Shared> {
+    Arc::new(Shared {
+        recording: AtomicBool::new(false),
+        arm: AtomicBool::new(false),
+        level: AtomicU32::new(0),
+        produced: AtomicU64::new(0),
+        preroll: Mutex::new(VecDeque::with_capacity(PREROLL_SAMPLES + 1024)),
+        device: Mutex::new(String::new()),
+        rebuild: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+    })
+}
+
 impl Capture {
+    /// The end-to-end harness's microphone: everything after the device - the pipeline, the
+    /// pre-roll, the level meter, the hand-off to the session - is the real thing. Silence
+    /// between takes, as a real microphone in a quiet room would give.
+    pub fn start_scripted(app: AppHandle, sessions: Arc<SessionManager>) -> (Capture, Tape) {
+        let shared = new_shared();
+        *shared.device.locked() = "scripted microphone (end-to-end test)".into();
+        let tape = Tape { queue: Arc::new(Mutex::new(VecDeque::new())), dead: Arc::new(AtomicBool::new(false)) };
+        {
+            let shared = shared.clone();
+            let queue = tape.queue.clone();
+            let dead = tape.dead.clone();
+            std::thread::Builder::new()
+                .name("scripted-microphone".into())
+                .spawn(move || {
+                    const BLOCK: usize = SAMPLE_RATE as usize / 50; // 20 ms
+                    let Ok(mut pipe) = Pipeline::new(SAMPLE_RATE, 1, shared.clone(), sessions) else { return };
+                    let mut block = vec![0f32; BLOCK];
+                    let mut next = std::time::Instant::now();
+                    while !shared.stop.load(Ordering::Relaxed) {
+                        if dead.load(Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(20));
+                            next = std::time::Instant::now();
+                            continue;
+                        }
+                        {
+                            let mut q = queue.locked();
+                            for s in block.iter_mut() {
+                                *s = q.pop_front().map_or(0.0, |v| v as f32 / 32768.0);
+                            }
+                        }
+                        pipe.push(&block);
+                        // Paced by the clock, not by sleeps, so the stream does not drift slow.
+                        next += Duration::from_millis(20);
+                        if let Some(wait) = next.checked_duration_since(std::time::Instant::now()) {
+                            std::thread::sleep(wait);
+                        }
+                    }
+                })
+                .expect("scripted microphone thread");
+        }
+        {
+            let shared = shared.clone();
+            crate::guard::spawn_supervised("level-meter", move || meter(app.clone(), shared.clone()))
+                .expect("meter thread");
+        }
+        (Capture { shared }, tape)
+    }
+
     pub fn start(app: AppHandle, sessions: Arc<SessionManager>) -> Capture {
         let shared = Arc::new(Shared {
             recording: AtomicBool::new(false),
@@ -61,19 +171,18 @@ impl Capture {
             rebuild: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
+        // Both restart if they panic: a dead supervisor is a microphone that never comes back.
         {
             let shared = shared.clone();
             let app = app.clone();
-            std::thread::Builder::new()
-                .name("audio-supervisor".into())
-                .spawn(move || supervise(app, shared, sessions))
-                .expect("audio thread");
+            crate::guard::spawn_supervised("audio-supervisor", move || {
+                supervise(app.clone(), shared.clone(), sessions.clone())
+            })
+            .expect("audio thread");
         }
         {
             let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("level-meter".into())
-                .spawn(move || meter(app, shared))
+            crate::guard::spawn_supervised("level-meter", move || meter(app.clone(), shared.clone()))
                 .expect("meter thread");
         }
         Capture { shared }
@@ -95,12 +204,17 @@ impl Capture {
     }
 
     pub fn device_name(&self) -> String {
-        self.shared.device.lock().unwrap().clone()
+        self.shared.device.locked().clone()
+    }
+
+    /// 16 kHz samples produced so far: moving while a stream delivers audio.
+    pub fn produced(&self) -> u64 {
+        self.shared.produced.load(Ordering::Relaxed)
     }
 
     /// True when a stream is open on a device.
     pub fn is_live(&self) -> bool {
-        !self.shared.device.lock().unwrap().is_empty()
+        !self.shared.device.locked().is_empty()
     }
 
     /// Reopen the stream, after the chosen microphone changed.
@@ -155,21 +269,28 @@ fn supervise(app: AppHandle, shared: Arc<Shared>, sessions: Arc<SessionManager>)
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
-                *shared.device.lock().unwrap() = name.clone();
-                last_error = None;
-                if name != last_device {
-                    crate::shell_log!("microphone: {name}");
+                *shared.device.locked() = name.clone();
+                let bluetooth = crate::win::bluetooth_microphones().iter().any(|b| b == &name);
+                if name != last_device || last_error.is_some() {
+                    crate::shell_log!(
+                        "microphone{}: {name}{}",
+                        if last_error.is_some() { " back" } else { "" },
+                        if bluetooth { " (Bluetooth)" } else { "" }
+                    );
                     last_device = name.clone();
                 }
-                let _ = app.emit("audio-device", json!({"device": name, "ok": true}));
+                last_error = None;
+                announce_device(&app, json!({"device": name, "ok": true, "bluetooth": bluetooth}));
                 let opened = std::time::Instant::now();
 
                 // Watch the stream: a dead device stops producing samples, and the default
                 // device can change under us (a headset connecting, or sleep and resume).
                 let mut last_count = shared.produced.load(Ordering::Relaxed);
                 let mut quiet_for = Duration::ZERO;
+                let mut ticks = 0u32;
                 loop {
                     std::thread::sleep(Duration::from_millis(500));
+                    ticks = ticks.wrapping_add(1);
                     if shared.stop.load(Ordering::Relaxed) {
                         return;
                     }
@@ -186,12 +307,18 @@ fn supervise(app: AppHandle, shared: Arc<Shared>, sessions: Arc<SessionManager>)
                         quiet_for = Duration::ZERO;
                         last_count = count;
                     }
-                    if current_device_name() != *shared.device.lock().unwrap() {
+                    // Has the default microphone changed, or the chosen one come back? Every few
+                    // seconds, not every tick: the check reads the settings file and asks Windows
+                    // for its devices, and doing that twice a second, all day, bought nothing -
+                    // a change made in the Hub asks for a rebuild directly.
+                    if ticks % DEVICE_CHECK_TICKS == 0
+                        && current_device_name() != *shared.device.locked()
+                    {
                         break;
                     }
                 }
                 drop(stream);
-                shared.device.lock().unwrap().clear();
+                shared.device.locked().clear();
                 // A stream that lasted a while was healthy; one that died at once was not.
                 backoff = if opened.elapsed() > Duration::from_secs(10) {
                     Duration::ZERO
@@ -204,10 +331,20 @@ fn supervise(app: AppHandle, shared: Arc<Shared>, sessions: Arc<SessionManager>)
             }
             Err(e) => {
                 let msg = e.to_string();
+                // Another app has it in exclusive mode (AUDCLNT_E_DEVICE_IN_USE): said as such,
+                // not as "OS Error -2004287478". It is retried like any other failure, so the
+                // microphone comes back by itself once that app lets go.
+                let busy = e.downcast_ref::<cpal::Error>().is_some_and(|c| c.kind() == cpal::ErrorKind::DeviceBusy);
                 if last_error.as_deref() != Some(msg.as_str()) {
-                    crate::shell_log!("microphone unavailable: {msg}");
-                    let _ =
-                        app.emit("audio-device", json!({"device": null, "ok": false, "error": msg}));
+                    let tried = current_device_name();
+                    crate::shell_log!(
+                        "microphone unavailable{}: {msg}",
+                        if busy { " (another app holds it in exclusive mode)" } else { "" }
+                    );
+                    announce_device(
+                        &app,
+                        json!({"device": (!tried.is_empty()).then_some(tried), "ok": false, "error": msg, "busy": busy}),
+                    );
                     last_error = Some(msg);
                 }
                 std::thread::sleep(Duration::from_secs(2));
@@ -268,13 +405,25 @@ fn build_stream(
 
     let mut pipe = Pipeline::new(rate, channels, shared.clone(), sessions.clone())?;
     let rebuild = shared.clone();
+    let glitches = AtomicU64::new(0);
     let err_fn = move |err: cpal::Error| {
-        // A device error is not recoverable in place; ask the supervisor for a new stream.
         // Through the log, not `eprintln!`: this runs on the audio callback thread, where a
         // panic from an unwritable stderr would take the microphone down with it - and a
         // windowed process launched from Explorer has no stderr. It belongs in the log
         // anyway, since a device that keeps failing is exactly what a report of "it stopped
         // hearing me" needs evidence for.
+        if !needs_rebuild(err.kind()) {
+            // A glitch: Windows lost a few samples and the stream goes on. It used to be
+            // rebuilt like a dead device, and a stream that glitched soon after opening then
+            // waited up to five seconds before the next try - over and over, so the microphone
+            // was off most of the time. Counted, and logged now and then.
+            let n = glitches.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n % 100 == 0 {
+                crate::shell_log!("[{}] {err} ({n} on this stream)", crate::problems::MIC_GLITCH.as_str());
+            }
+            return;
+        }
+        // A device error is not recoverable in place; ask the supervisor for a new stream.
         crate::shell_log!("[audio] {err}");
         rebuild.rebuild.store(true, Ordering::SeqCst);
     };
@@ -308,6 +457,12 @@ fn build_stream(
         other => return Err(anyhow::anyhow!("unsupported sample format {other:?}")),
     };
     Ok((stream, name))
+}
+
+/// Whether an error from the audio device means the stream is gone. An underrun or overrun
+/// ("xrun") only means some samples were lost; the stream carries on.
+fn needs_rebuild(kind: cpal::ErrorKind) -> bool {
+    !matches!(kind, cpal::ErrorKind::Xrun)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -475,7 +630,7 @@ impl Pipeline {
         }
         self.shared.produced.fetch_add(self.scratch.len() as u64, Ordering::Relaxed);
 
-        let mut ring = self.shared.preroll.lock().unwrap();
+        let mut ring = self.shared.preroll.locked();
         ring.extend(self.scratch.iter().copied());
         while ring.len() > PREROLL_SAMPLES {
             ring.pop_front();
@@ -503,6 +658,15 @@ fn to_i16(s: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_glitch_keeps_the_stream_and_a_lost_device_rebuilds_it() {
+        assert!(!needs_rebuild(cpal::ErrorKind::Xrun));
+        for kind in [cpal::ErrorKind::DeviceNotAvailable, cpal::ErrorKind::StreamInvalidated,
+                     cpal::ErrorKind::BackendError] {
+            assert!(needs_rebuild(kind), "{kind:?}");
+        }
+    }
 
     /// A 1 kHz tone at 48 kHz must come out as a 1 kHz tone at 16 kHz with its amplitude
     /// intact: the right frequency, and no attenuation from a badly normalised kernel.

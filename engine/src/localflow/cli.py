@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import json
 import logging
+import os
 import sys
 import threading
 import wave
@@ -13,7 +16,7 @@ from logging.handlers import RotatingFileHandler
 import numpy as np
 
 from localflow import __version__
-from localflow.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, Config
+from localflow.config import CONFIG_DIR, CONFIG_PATH, FAULT_PATH, LOG_PATH, SAFE_MODE_ENV, Config, apply_safe_mode
 
 log = logging.getLogger(__name__)
 
@@ -35,8 +38,55 @@ def _setup_logging(level: str) -> None:
     logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 
+_fault_file = None  # held open for the life of the process: faulthandler writes to it at the end
+
+
+def _install_crash_hooks(fault_path=FAULT_PATH) -> None:
+    """Make every way the engine can die leave something in the log.
+
+    Before, an exception outside `main`'s own handler, or in a thread, went to stderr - which
+    under the shell is a pipe it keeps only the last few lines of - and a native crash (a fault
+    in onnxruntime, say) left nothing anywhere: the shell's "engine exited" was all there was.
+    """
+    global _fault_file
+
+    def on_exception(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        log.critical("unhandled exception; the engine is stopping", exc_info=(exc_type, exc, tb))
+
+    def on_thread_exception(args):
+        if args.exc_type is SystemExit:
+            return
+        name = args.thread.name if args.thread is not None else "?"
+        log.critical("unhandled exception in thread %s", name,
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = on_exception
+    threading.excepthook = on_thread_exception
+
+    # A native crash cannot run Python, so the stack is written by faulthandler, to its own
+    # file, and moved into the log by the next engine to start.
+    try:
+        if fault_path.exists() and fault_path.stat().st_size > 0:
+            text = fault_path.read_text(encoding="utf-8", errors="replace").strip()
+            log.error("the previous engine ended with a fatal error:\n%s", text)
+        _fault_file = open(fault_path, "w", encoding="utf-8")
+        faulthandler.enable(file=_fault_file, all_threads=True)
+    except OSError as e:
+        log.warning("could not set up the crash report file %s: %s", fault_path, e)
+
+
 # ---------------------------------------------------------------------------------------------
 def cmd_serve(cfg: Config, port: int, token: str | None, handshake: bool) -> int:
+    if cfg.stt.device != "cpu":
+        # First thing: the speech worker starts loading the model the engine will most likely ask
+        # for - the saved one, on the graphics card (the settings Engine._speech_cfg makes) -
+        # while the engine itself starts up.
+        from localflow.stt import remote
+
+        remote.prestart(replace(cfg.stt, device="cuda" if cfg.stt.device == "cuda" else "auto"))
     from localflow.service.server import serve
 
     return serve(cfg, port=port, token=token, handshake=handshake)
@@ -122,6 +172,46 @@ def cmd_devices(cfg: Config) -> int:
         mark = "*" if idx == chosen else " "
         print(f"{mark}{idx:>3}  {api:<20} {name}")
     print("\n* = device LocalFlow will use (config: audio.device = index or name substring)")
+    return 0
+
+
+def cmd_hardware(as_json: bool = False) -> int:
+    from localflow import gpu, hwinfo
+    from localflow.config import MODELS_DIR
+
+    report = hwinfo.detect()
+    driver = gpu.monitor().driver_version()
+    if as_json:
+        free_ram, free_disk = hwinfo.ram_free_gb(), hwinfo.disk_free_gb(MODELS_DIR)
+        print(json.dumps({**report.as_dict(), "nvidia_driver": driver,
+                          "ram_free_gb": round(free_ram, 1) if free_ram is not None else None,
+                          "disk_free_gb": round(free_disk, 1) if free_disk is not None else None}, indent=2))
+        return 0
+    for line in hwinfo.describe(report, MODELS_DIR):
+        print(line)
+    if driver:
+        print(f"NVIDIA     driver {driver}")
+    return 0
+
+
+def cmd_cuda(install: bool = False) -> int:
+    from localflow import cudalibs
+
+    if cudalibs.bundled():
+        print("bundled: the nvidia packages beside onnxruntime are used; nothing to download")
+    elif cudalibs.installed():
+        print(f"downloaded: {cudalibs.lib_dir()}")
+    elif install:
+        def progress(done: int, total: int) -> None:
+            print(f"\r{done / 2**20:,.0f} of {total / 2**20:,.0f} MB", end="", flush=True)
+
+        print(f"ready: {cudalibs.ensure(progress)}")
+    else:
+        print(f"not downloaded ({cudalibs.DOWNLOAD_BYTES / 2**30:.1f} GB); `localflow cuda --install` fetches them")
+    from localflow.stt.parakeet import cuda_available
+
+    ok, reason = cuda_available()
+    print(f"speech on the graphics card: {'yes' if ok else 'no'} ({reason})")
     return 0
 
 
@@ -219,6 +309,10 @@ def cmd_bench(cfg: Config, args) -> int:
         return bench.fetch_public(args.n)
     if sub == "record":
         return bench.record_own(cfg)
+    if sub == "release":
+        from localflow import perfrecord
+
+        return perfrecord.release(cfg)
     if sub == "stream":
         return 0 if bench.stream(cfg, args.set, args.limit) else 1
     if sub == "cleanup":
@@ -232,6 +326,11 @@ def cmd_bench(cfg: Config, args) -> int:
         stt = replace(stt, model_path=args.model_path)
     if args.backend:
         stt = replace(stt, backend=args.backend)
+    if args.speech:
+        from localflow.stt import catalogue
+
+        stt = replace(stt)
+        catalogue.get(args.speech).apply(stt)
     cfg = replace(cfg, stt=stt)
     return 0 if bench.run(cfg, args.set, args.limit, args.quiet) else 1
 
@@ -246,10 +345,15 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int, default=0, help="0 = pick a free port")
     sv.add_argument("--token", default=None, help="auth token (default: random, printed with --handshake)")
     sv.add_argument("--handshake", action="store_true", help="print {port, token, pid} as JSON on stdout when ready")
+    sub.add_parser("speech-worker", help=argparse.SUPPRESS)  # the engine's GPU speech process (stt/remote.py)
     sw = sub.add_parser("send-wav", help="stream a WAV through the engine like a dictation (latency test)")
     sw.add_argument("wav")
     sw.add_argument("--fast", action="store_true", help="send audio as fast as possible instead of real time")
     sub.add_parser("devices", help="list microphones")
+    hw = sub.add_parser("hardware", help="what this computer has: processor, memory, graphics, disk")
+    hw.add_argument("--json", action="store_true", help="the report as JSON")
+    cu = sub.add_parser("cuda", help="the graphics card libraries speech needs on an NVIDIA card: where they are")
+    cu.add_argument("--install", action="store_true", help="download them now (about 1 GB) if they are missing")
     t = sub.add_parser("transcribe", help="transcribe a WAV file (debug the STT pipeline)")
     t.add_argument("wav")
     sub.add_parser("config", help="print config path and contents")
@@ -270,25 +374,43 @@ def _add_bench_parser(sub) -> None:
     br.add_argument("--precision", default=None, help="override stt.precision: auto | fp32 | fp16 | int8")
     br.add_argument("--model-path", default=None, help="override stt.model_path (directory of model files)")
     br.add_argument("--backend", default=None, help="override stt.backend: parakeet | whisper")
+    br.add_argument("--speech", default=None,
+                    help="a speech model from the catalogue: parakeet-v3, parakeet-v2, parakeet-v3-compact, "
+                         "whisper-turbo")
     br.add_argument("--quiet", action="store_true")
     bs = bsub.add_parser("stream", help="stream a set through a real engine at real-time pace (release latency KPI)")
     bs.add_argument("--set", default="own", choices=["public", "own", "all"])
     bs.add_argument("--limit", type=int, default=None)
     bc = bsub.add_parser("cleanup", help="run the clean-up quality set (rules vs rules+LLM)")
-    bc.add_argument("--model", default=None, help="bundled model key (qwen3-4b, qwen3-1.7b) or provider model name")
+    bc.add_argument("--model", default=None, help="bundled model key (qwen3-4b, phi-4-mini, gemma-4-e2b, ...; see llm/manifest.py) or provider model name")
     bc.add_argument("--rules-only", action="store_true")
-    bc.add_argument("--device", default="auto", help="auto | cpu (CPU build of llama.cpp, for prompt work while the GPU is busy)")
+    bc.add_argument("--device", default="auto",
+                    help="auto | cpu (CPU build of llama.cpp, for prompt work while the GPU is busy) | "
+                         "vulkan (AMD/Intel graphics)")
     bc.add_argument("--quiet", action="store_true")
     bf = bsub.add_parser("fetch", help="download the public LibriSpeech test-clean subset")
     bf.add_argument("--n", type=int, default=60)
     bsub.add_parser("record", help="record the own-voice set from a list of prompts")
+    bsub.add_parser("release", help="the performance record for this version: start-up, latency, accuracy, "
+                                    "memory and clean-up quality, written to docs/perf and compared with the last")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "speech-worker":
+        # Before anything else: it logs through the engine, and its stdout is the channel.
+        from localflow.stt.remote import worker_main
+
+        sys.exit(worker_main())
     cfg = Config.load()
     _setup_logging(args.log_level or cfg.log_level)
+    # Before anything imports huggingface_hub (it reads the mirror once), and before any child
+    # process starts (they inherit the proxy). The engine looks the proxy up in the background.
+    from localflow import net
+
+    net.apply_endpoint(cfg.network.hf_endpoint)
+    net.apply_proxy(background=args.cmd == "serve")
     # There is no default command any more. `run` used to be it, because a shortcut to
     # `localflow-bg` with no arguments started the tray app; the shell owns all of that now and
     # always asks for `serve` explicitly, so a bare `localflow` is someone looking for help.
@@ -297,11 +419,20 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(0)
     try:
         if args.cmd == "serve":
+            _install_crash_hooks()
+            if os.environ.get(SAFE_MODE_ENV) == "1":
+                apply_safe_mode(cfg)
+                log.warning("SAFE MODE: the engine crashed repeatedly, so this one runs on the processor, "
+                            "with the default speech model and no AI clean-up. Settings on disk are unchanged.")
             code = cmd_serve(cfg, args.port, args.token, args.handshake)
         elif args.cmd == "send-wav":
             code = cmd_send_wav(cfg, args.wav, realtime=not args.fast)
         elif args.cmd == "devices":
             code = cmd_devices(cfg)
+        elif args.cmd == "hardware":
+            code = cmd_hardware(as_json=args.json)
+        elif args.cmd == "cuda":
+            code = cmd_cuda(install=args.install)
         elif args.cmd == "transcribe":
             code = cmd_transcribe(cfg, args.wav)
         elif args.cmd == "config":

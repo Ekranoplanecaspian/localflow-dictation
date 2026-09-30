@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from localflow.llm.providers import LLMProvider
+from localflow.problems import command_code
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class CommandResult:
             "text": self.text,
             "changed": self.changed,
             "rejected": self.rejected,
+            "code": command_code(self.rejected),
             "ms": round(self.ms) if self.ms is not None else None,
         }
 

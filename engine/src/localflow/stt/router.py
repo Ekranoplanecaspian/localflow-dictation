@@ -1,25 +1,29 @@
 """Language routing: Parakeet for the languages it knows, Whisper for everything else.
 
 Parakeet TDT 0.6B v3 auto-detects among 25 European languages and is the fast, accurate
-default. A dictation whose language is set to anything else goes to Whisper large-v3-turbo,
-which is loaded on first use so users who never need it never pay for it.
+default; v2 knows only English. A dictation whose language is set to anything else goes to
+Whisper large-v3-turbo, which is loaded on first use so users who never need it never pay for it.
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
+import time
 
 import numpy as np
 
 from localflow.config import STTConfig
+from localflow.stt import catalogue
+from localflow.stt.catalogue import PARAKEET_LANGUAGES
 from localflow.stt.parakeet import ParakeetTranscriber
 
 log = logging.getLogger(__name__)
 
-PARAKEET_LANGUAGES = frozenset(
-    "bg hr cs da nl en et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk".split()
-)
+# Whisper is dropped after this long unused. It is loaded for the odd dictation in a language
+# Parakeet does not know, and used to stay for good: 1.6 GB of graphics memory and more of RAM.
+WHISPER_IDLE_S = 600.0
 
 
 def normalize_language(language: str | None) -> str | None:
@@ -37,8 +41,11 @@ class RoutedTranscriber:
 
     def __init__(self, cfg: STTConfig):
         self.cfg = cfg
+        entry = catalogue.current(cfg)
+        self.languages = entry.languages if entry and entry.languages else PARAKEET_LANGUAGES
         self.primary = ParakeetTranscriber(cfg)
         self._whisper = None
+        self._whisper_used = 0.0
         self._lock = threading.Lock()
 
     # the engine reports the primary model's placement
@@ -52,7 +59,7 @@ class RoutedTranscriber:
 
     def warmup(self) -> None:
         self.primary.warmup()
-        if normalize_language(self.cfg.language) not in (None, *PARAKEET_LANGUAGES):
+        if normalize_language(self.cfg.language) not in (None, *self.languages):
             self.whisper().warmup()
 
     def warm(self) -> None:
@@ -64,11 +71,23 @@ class RoutedTranscriber:
                 from localflow.stt.whisper_onnx import WhisperOnnxTranscriber
 
                 self._whisper = WhisperOnnxTranscriber(self.cfg)
+            self._whisper_used = time.monotonic()
             return self._whisper
+
+    def drop_idle_whisper(self, after_s: float = WHISPER_IDLE_S) -> bool:
+        """Unload Whisper if it has not been used for `after_s`. Call it on the speech worker,
+        so no decode can be using it. Returns whether it was unloaded."""
+        with self._lock:
+            if self._whisper is None or time.monotonic() - self._whisper_used < after_s:
+                return False
+            self._whisper = None
+        gc.collect()
+        log.info("Whisper unloaded: not used for %.0f minutes", after_s / 60)
+        return True
 
     def pick(self, language: str | None):
         code = normalize_language(language) or normalize_language(self.cfg.language)
-        if code is None or code in PARAKEET_LANGUAGES:
+        if code is None or code in self.languages:
             return self.primary
         return self.whisper()
 

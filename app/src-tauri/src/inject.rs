@@ -16,18 +16,20 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RETURN,
     VK_RWIN, VK_SHIFT, VK_TAB, VK_V,
 };
+
+use crate::guard::LockExt;
 
 /// Typed text survives up to about a dozen characters even in the controls that mangle it, and
 /// staying off the clipboard for a short correction is worth it. Anything longer is pasted.
@@ -107,6 +109,31 @@ pub fn method_for(app: &str, text: &str) -> Method {
 mod tests {
     use super::*;
 
+    /// Text goes only where it was spoken, never into whatever is in front now.
+    #[test]
+    fn text_is_kept_when_the_window_changed_or_nothing_can_take_it() {
+        let never = |_: isize| false;
+        // Numbers that are not real windows: each is its own top-level window.
+        assert_eq!(obstacle(1001, 1001, never), None);
+        assert_eq!(obstacle(1001, 2002, never), Some(Obstacle::WindowChanged));
+        assert_eq!(obstacle(0, 2002, never), None, "Paste last dictation: whatever is in front");
+        assert_eq!(obstacle(1001, 0, never), Some(Obstacle::NoWindow));
+        assert_eq!(obstacle(1001, 1001, |_| true), Some(Obstacle::Elevated));
+        // The taskbar is in front: nowhere to type.
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        let class: Vec<u16> = "Shell_TrayWnd".encode_utf16().chain(Some(0)).collect();
+        if let Ok(taskbar) = unsafe { FindWindowW(windows::core::PCWSTR(class.as_ptr()), None) } {
+            let taskbar = taskbar.0 as isize;
+            assert_eq!(obstacle(0, taskbar, never), Some(Obstacle::NoWindow));
+        }
+    }
+
+    #[test]
+    fn this_process_does_not_block_its_own_keystrokes() {
+        assert!(!crate::win::keystrokes_blocked(0));
+        assert!(!crate::win::process_elevated_for_tests(std::process::id()).unwrap_or(false));
+    }
+
     /// Typing is only trusted for text short enough to survive the controls that mangle it.
     #[test]
     fn only_very_short_text_is_typed() {
@@ -129,6 +156,52 @@ mod tests {
         assert_eq!(with_spacing("Hello there.", false), "Hello there.");
     }
 
+    /// Uses the real Windows clipboard, so it only runs when asked for
+    /// (`cargo test -- --ignored`). Whatever was on the clipboard before is put back at the end.
+    ///
+    /// The bug: an image on the clipboard was not text, so nothing was saved, and a dictation
+    /// replaced it for good.
+    #[test]
+    #[ignore]
+    fn a_paste_puts_back_an_image_that_was_on_the_clipboard() {
+        let users = {
+            let _g = ClipboardGuard::open().unwrap();
+            unsafe { Snapshot::take_locked() }.unwrap()
+        };
+        let result = std::panic::catch_unwind(|| {
+            // A 1x1 32-bit DIB, the way screenshots arrive: header, then one pixel.
+            let mut dib = Vec::new();
+            for v in [40u32, 1, 1] {
+                dib.extend_from_slice(&v.to_le_bytes());
+            }
+            dib.extend_from_slice(&1u16.to_le_bytes());
+            dib.extend_from_slice(&32u16.to_le_bytes());
+            dib.extend_from_slice(&[0u8; 24]);
+            dib.extend_from_slice(&[0x11, 0x22, 0x33, 0xFF]);
+            {
+                let _g = ClipboardGuard::open().unwrap();
+                unsafe {
+                    EmptyClipboard().unwrap();
+                    set_locked(8, &dib).unwrap(); // CF_DIB
+                }
+            }
+
+            let saved = clipboard_swap("dictated text").unwrap();
+            assert_eq!(clipboard_text().as_deref(), Some("dictated text"));
+            saved.restore().unwrap();
+
+            let back = {
+                let _g = ClipboardGuard::open().unwrap();
+                unsafe { Snapshot::take_locked() }.unwrap()
+            };
+            let image = back.0.iter().find(|(f, _)| *f == 8).expect("the image is back");
+            assert_eq!(&image.1[..dib.len()], &dib[..]);
+            assert_eq!(clipboard_text(), None, "and the dictated text is gone again");
+        });
+        users.restore().unwrap();
+        result.unwrap();
+    }
+
     /// In a chat app a typed Enter sends the message, and in a shell it runs the line. Both
     /// are irreversible, so multi-line text goes in as one paste instead.
     #[test]
@@ -146,6 +219,10 @@ struct Job {
     app: AppHandle,
     text: String,
     target: String,
+    /// The window the take was spoken into; 0 for "whatever is in front" (Paste last dictation).
+    window: isize,
+    /// A password: typed, never pasted, and not kept for Paste last dictation.
+    private: bool,
     /// The per-app method override, already resolved. Resolved by the caller rather than here
     /// so the injector thread never touches the settings file.
     method: Option<Method>,
@@ -161,46 +238,145 @@ fn injector() -> &'static Sender<Job> {
             .name("injector".into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
-                    let started = Instant::now();
-                    let wanted = job.method.unwrap_or_else(|| method_for(&job.target, &job.text));
-                    let result = inject(&job.text, wanted, &job.target);
-                    let method = *result.as_ref().unwrap_or(&wanted);
-                    let payload = json!({
-                        "method": method.name(),
-                        "chars": job.text.chars().count(),
-                        "app": job.target,
-                        "ms": started.elapsed().as_millis() as u64,
-                        "error": result.as_ref().err().map(|e| e.to_string()),
-                    });
-                    if result.is_ok() && job.auto_send {
-                        // After the text, not before: pressing Enter first would send an empty
-                        // message, and pressing it too soon can beat the paste into the field.
-                        std::thread::sleep(Duration::from_millis(60));
-                        if let Err(e) = tap_enter() {
-                            crate::shell_log!("auto-send failed in {}: {e}", job.target);
-                        } else {
-                            crate::shell_log!("auto-sent in {}", job.target);
-                        }
+                    // One bad job must not end the thread every later dictation is typed by.
+                    let app = job.app.clone();
+                    if crate::guard::catch("injection", move || run_job(job)).is_none() {
+                        let _ = app.emit("injected", json!({"error": "an internal fault while typing"}));
                     }
-                    match result {
-                        Ok(_) => crate::shell_log!(
-                            "injected {} chars by {} into {} in {} ms",
-                            job.text.chars().count(),
-                            method.name(),
-                            if job.target.is_empty() { "the caret" } else { &job.target },
-                            started.elapsed().as_millis()
-                        ),
-                        Err(ref e) => crate::shell_log!(
-                            "injection FAILED into {}: {e}",
-                            if job.target.is_empty() { "the caret" } else { &job.target }
-                        ),
-                    }
-                    let _ = job.app.emit("injected", payload);
                 }
             })
             .expect("injector thread");
         tx
     })
+}
+
+/// Why a job's text cannot go where it was meant to, right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Obstacle {
+    /// A different window is in front than the one the take was spoken into.
+    WindowChanged,
+    /// The desktop or the taskbar is in front.
+    NoWindow,
+    /// The window's app runs as administrator; Windows drops LocalFlow's keystrokes to it.
+    Elevated,
+}
+
+/// What stands between `text` and the window in front, if anything. `spoken_into` is the take's
+/// window (0: none in particular).
+pub fn obstacle(spoken_into: isize, in_front: isize, blocked: impl Fn(isize) -> bool) -> Option<Obstacle> {
+    if in_front == 0 || crate::win::is_shell_window(in_front) {
+        return Some(Obstacle::NoWindow);
+    }
+    if spoken_into != 0 && crate::win::root_window(spoken_into) != crate::win::root_window(in_front) {
+        return Some(Obstacle::WindowChanged);
+    }
+    if blocked(in_front) {
+        return Some(Obstacle::Elevated);
+    }
+    None
+}
+
+/// The most recent dictation, for Paste last dictation. Only in memory, and never a password.
+static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn remember_last(text: &str) {
+    *LAST.locked() = Some(text.to_owned());
+}
+
+/// Tell the flow bar, and the log, why text was kept rather than typed.
+fn say_kept(app: &AppHandle, code: crate::problems::Code, chars: usize) {
+    let text = crate::problems::bar(code, &[]);
+    crate::shell_log!("[{}] kept {chars} chars: {text}", code.as_str());
+    let _ = app.emit("notice", json!({"code": code.as_str(), "text": text, "hold_ms": 5000}));
+}
+
+/// Type or paste one job's text, then report how it went.
+fn run_job(job: Job) {
+    let started = Instant::now();
+    if crate::e2e::typing() {
+        // On the lock screen or a UAC prompt's secure desktop, nothing of this session can take
+        // keystrokes, whatever window was in front before.
+        let in_front = if crate::power::on_own_desktop() { crate::win::foreground_window() } else { 0 };
+        if let Some(why) = obstacle(job.window, in_front, crate::win::keystrokes_blocked) {
+            let chars = job.text.chars().count();
+            match why {
+                // Windows would drop the keystrokes, but not the user's own Ctrl+V.
+                Obstacle::Elevated => match copy_private(&job.text) {
+                    Ok(()) => say_kept(&job.app, crate::problems::TEXT_COPIED_ADMIN, chars),
+                    Err(e) => {
+                        crate::shell_log!("could not copy for an administrator app: {e}");
+                        say_kept(&job.app, crate::problems::TEXT_KEPT_NO_WINDOW, chars);
+                    }
+                },
+                Obstacle::WindowChanged => say_kept(&job.app, crate::problems::TEXT_KEPT_WINDOW_CHANGED, chars),
+                Obstacle::NoWindow => say_kept(&job.app, crate::problems::TEXT_KEPT_NO_WINDOW, chars),
+            }
+            if !job.private {
+                remember_last(job.text.trim_end());
+            }
+            let _ = job.app.emit(
+                "injected",
+                json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
+            );
+            return;
+        }
+    }
+    // A password is typed: pasting would put it on the clipboard.
+    let wanted = if job.private {
+        Method::Type
+    } else {
+        job.method.unwrap_or_else(|| method_for(&job.target, &job.text))
+    };
+    if !crate::e2e::typing() {
+        // A soak run: everything up to here was the real thing; the keystrokes are left out.
+        let _ = job.app.emit(
+            "injected",
+            json!({"method": "none", "chars": job.text.chars().count(), "app": job.target, "ms": 0, "error": null}),
+        );
+        return;
+    }
+    let result = match crate::e2e::may_type_now() {
+        Ok(()) => inject(&job.text, wanted, &job.target),
+        Err(why) => {
+            crate::shell_log!("{why}");
+            Err(windows::core::Error::new(windows::core::HRESULT(0x80004004u32 as i32), why))
+        }
+    };
+    let method = *result.as_ref().unwrap_or(&wanted);
+    let payload = json!({
+        "method": method.name(),
+        "chars": job.text.chars().count(),
+        "app": job.target,
+        "ms": started.elapsed().as_millis() as u64,
+        "error": result.as_ref().err().map(|e| e.to_string()),
+    });
+    if result.is_ok() && job.auto_send {
+        // After the text, not before: pressing Enter first would send an empty
+        // message, and pressing it too soon can beat the paste into the field.
+        std::thread::sleep(Duration::from_millis(60));
+        if let Err(e) = tap_enter() {
+            crate::shell_log!("auto-send failed in {}: {e}", job.target);
+        } else {
+            crate::shell_log!("auto-sent in {}", job.target);
+        }
+    }
+    if result.is_ok() && !job.private {
+        remember_last(job.text.trim_end());
+    }
+    match result {
+        Ok(_) => crate::shell_log!(
+            "injected {} chars by {} into {} in {} ms",
+            job.text.chars().count(),
+            method.name(),
+            if job.target.is_empty() { "the caret" } else { &job.target },
+            started.elapsed().as_millis()
+        ),
+        Err(ref e) => crate::shell_log!(
+            "injection FAILED into {}: {e}",
+            if job.target.is_empty() { "the caret" } else { &job.target }
+        ),
+    }
+    let _ = job.app.emit("injected", payload);
 }
 
 /// A dictation ends with a space so the next one does not run into it.
@@ -229,7 +405,9 @@ pub fn deliver_replacement(app: &AppHandle, text: &str) {
     if text.is_empty() {
         return;
     }
-    let target = crate::context::last().map(|c| c.app).unwrap_or_default();
+    let last = crate::context::last();
+    let target = last.as_ref().map(|c| c.app.clone()).unwrap_or_default();
+    let window = last.as_ref().map(|c| c.hwnd).unwrap_or(0);
     let rule = crate::settings::load().rule_for(&target);
     // No auto-send on a command-mode edit: the user was rewriting text in place, not composing
     // a message, and sending it would be irreversible.
@@ -237,28 +415,81 @@ pub fn deliver_replacement(app: &AppHandle, text: &str) {
         app: app.clone(),
         text: text.to_owned(),
         target,
+        window,
+        private: false,
         method: method_override(&rule.method),
         auto_send: false,
     });
 }
 
-/// Queue text for delivery to the app that was focused when the dictation started.
-pub fn deliver(app: &AppHandle, text: &str) {
+/// Queue text for delivery. `target` is the app that was focused when this take started, whose
+/// rules apply - not the most recent one, which is a newer take's when takes overlap - and
+/// `window` the window it was spoken into: text is never typed into a different one.
+pub fn deliver(app: &AppHandle, text: &str, target: &str, window: isize, private: bool) {
     if text.is_empty() {
         return;
     }
     let settings = crate::settings::load();
-    let target = crate::context::last().map(|c| c.app).unwrap_or_default();
+    let target = target.to_owned();
     let rule = settings.rule_for(&target);
     // A message that sends itself needs no trailing space: there is nothing coming after it.
-    let text = with_spacing(text, settings.trailing_space && !rule.auto_send);
+    // Nor does a password: a space would become part of it.
+    let text = with_spacing(text, settings.trailing_space && !rule.auto_send && !private);
     let _ = injector().send(Job {
         app: app.clone(),
         text,
         target,
+        window,
+        private,
         method: method_override(&rule.method),
-        auto_send: rule.auto_send,
+        // A password field's Enter is the user's to press.
+        auto_send: rule.auto_send && !private,
     });
+}
+
+/// Paste last dictation (Win+Alt+V, and the tray): the most recent dictation again, into
+/// whatever is in front now - the way to rescue text that was kept rather than typed.
+pub fn paste_last(app: &AppHandle) {
+    let Some(text) = LAST.locked().clone() else {
+        let code = crate::problems::PASTE_LAST_EMPTY;
+        let _ = app.emit("notice", json!({"code": code.as_str(), "text": crate::problems::bar(code, &[])}));
+        return;
+    };
+    let ctx = crate::context::foreground();
+    let rule = crate::settings::load().rule_for(&ctx.app);
+    crate::shell_log!("paste last dictation ({} chars) into {}", text.chars().count(), ctx.app);
+    let _ = injector().send(Job {
+        app: app.clone(),
+        text: with_spacing(&text, crate::settings::load().trailing_space),
+        target: ctx.app,
+        window: 0,
+        private: false,
+        method: method_override(&rule.method),
+        auto_send: false,
+    });
+}
+
+/// The tray's Paste last dictation. By the time its item fires, the taskbar or LocalFlow's own
+/// menu window is in front, not the app the text is for: go back to that app first.
+pub fn paste_last_from_tray(app: &AppHandle) {
+    let front = crate::win::foreground_window();
+    let mut front_pid = 0u32;
+    unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(
+            windows::Win32::Foundation::HWND(front as *mut _),
+            Some(&mut front_pid),
+        )
+    };
+    if crate::win::is_shell_window(front) || front_pid == std::process::id() {
+        let back = crate::win::last_app_window();
+        let ok = back != 0 && crate::win::bring_to_front(back);
+        crate::shell_log!(
+            "paste last dictation from the tray: back to {} ({})",
+            crate::win::describe(back),
+            if ok { "in front" } else { "Windows would not bring it to the front" }
+        );
+    }
+    paste_last(app);
 }
 
 /// A per-app method setting, or None to let `method_for` decide.
@@ -436,24 +667,39 @@ fn type_text(text: &str, shift_enter: bool) -> windows::core::Result<()> {
 }
 
 fn paste_text(text: &str) -> windows::core::Result<()> {
-    let previous = clipboard_set(text)?;
+    let previous = clipboard_swap(text)?;
     let mut inputs = Vec::with_capacity(4);
     inputs.push(key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)));
     tap(VK_V, &mut inputs);
     inputs.push(key(VK_CONTROL, 0, KEYEVENTF_KEYUP));
-    send(&inputs)?;
-    if let Some(previous) = previous {
-        // The target reads the clipboard when it gets round to handling Ctrl+V, so restoring
-        // it synchronously would race that read. Put it back once the paste has landed.
-        std::thread::Builder::new()
-            .name("clipboard-restore".into())
-            .spawn(move || {
-                std::thread::sleep(CLIPBOARD_SETTLE);
-                let _ = clipboard_set(&previous);
-            })
-            .ok();
+    if let Err(e) = send(&inputs) {
+        let _ = previous.restore();
+        return Err(e);
+    }
+    // The target reads the clipboard when it gets round to handling Ctrl+V, so restoring it
+    // synchronously would race that read. Put it back once the paste has landed - and have
+    // the next clipboard user wait for that, or a second paste within the settle time would
+    // take this dictation for the user's clipboard and restore it instead of theirs.
+    let restore = std::thread::Builder::new().name("clipboard-restore".into()).spawn(move || {
+        std::thread::sleep(CLIPBOARD_SETTLE);
+        let _ = previous.restore();
+    });
+    if let Ok(handle) = restore {
+        *PENDING_RESTORE.locked() = Some(handle);
     }
     Ok(())
+}
+
+/// The restore still to come from the last paste.
+static PENDING_RESTORE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+/// Let the last paste put the user's clipboard back before anything else takes it.
+fn wait_for_restore() {
+    let pending = PENDING_RESTORE.locked().take();
+    if let Some(handle) = pending {
+        let _ = handle.join();
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -481,6 +727,21 @@ impl Drop for ClipboardGuard {
         unsafe {
             let _ = CloseClipboard();
         }
+    }
+}
+
+/// Everything on the clipboard now, to be put back with `restore`.
+pub fn clipboard_snapshot() -> Option<Snapshot> {
+    let _guard = ClipboardGuard::open().ok()?;
+    unsafe { Snapshot::take_locked() }
+}
+
+/// Replace the clipboard with one block of data in one format.
+pub fn clipboard_set(format: u32, bytes: &[u8]) -> windows::core::Result<()> {
+    let _guard = ClipboardGuard::open()?;
+    unsafe {
+        EmptyClipboard()?;
+        set_locked(format, bytes)
     }
 }
 
@@ -519,7 +780,7 @@ pub fn copy_selection() -> Option<String> {
         return None;
     }
     // Writing the probe also gets us the real clipboard contents to restore afterwards.
-    let previous = clipboard_set(COPY_PROBE).ok()?;
+    let previous = clipboard_swap(COPY_PROBE).ok()?;
     let _ = chord(CTRL, VIRTUAL_KEY(0x43)); // Ctrl+C
     let deadline = Instant::now() + COPY_WAIT;
     let mut copied = None;
@@ -533,40 +794,146 @@ pub fn copy_selection() -> Option<String> {
             _ => {}
         }
     }
-    match previous {
-        Some(prev) => {
-            let _ = clipboard_set(&prev);
-        }
-        // There was nothing on the clipboard before; leave our probe off it either way.
-        None => {
-            let _ = clipboard_set("");
-        }
-    }
+    // Whatever was there - text, an image, files, or nothing - goes back, and the probe with it.
+    let _ = previous.restore();
     copied.filter(|t| !t.trim().is_empty())
 }
 
-/// Replace the clipboard text, returning what was there so it can be restored.
-fn clipboard_set(text: &str) -> windows::core::Result<Option<String>> {
-    let guard = ClipboardGuard::open()?;
-    let previous = unsafe { clipboard_get_locked() };
+/// Clipboard formats whose data is a GDI object rather than a block of memory, so it cannot be
+/// copied as bytes: bitmap, metafile picture, palette, enhanced metafile, and the owner-display
+/// family. Nothing is lost by skipping them: Windows synthesises a bitmap from the DIB that
+/// every image copy also carries.
+const GDI_FORMATS: [u32; 8] = [2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E];
+/// More than this on the clipboard is not copied aside; the paste is typed instead.
+const SNAPSHOT_MAX: usize = 256 << 20;
 
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
-    wide.push(0);
-    unsafe {
-        let bytes = wide.len() * 2;
-        let handle: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
-        let ptr = GlobalLock(handle) as *mut u16;
-        if ptr.is_null() {
-            return Err(windows::core::Error::from_thread());
-        }
-        std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-        let _ = GlobalUnlock(handle);
-        EmptyClipboard()?;
-        // Ownership of the block passes to the clipboard on success.
-        SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(handle.0)))?;
+/// Everything on the clipboard, as (format, bytes), so it can be put back exactly.
+///
+/// The clipboard used to be saved as text only. A screenshot or a copied file was not text, so
+/// nothing was saved, and dictating replaced it for good with the dictated sentence.
+pub struct Snapshot(Vec<(u32, Vec<u8>)>);
+
+impl Snapshot {
+    /// The bytes held in one format, if it is there.
+    pub fn format(&self, format: u32) -> Option<&[u8]> {
+        self.0.iter().find(|(f, _)| *f == format).map(|(_, b)| b.as_slice())
     }
-    drop(guard);
-    Ok(previous)
+
+    /// Caller must hold the clipboard open. None when it holds more than is sensible to copy.
+    unsafe fn take_locked() -> Option<Snapshot> {
+        let mut formats = Vec::new();
+        let mut total = 0usize;
+        let mut format = 0u32;
+        loop {
+            format = EnumClipboardFormats(format);
+            if format == 0 {
+                break;
+            }
+            if GDI_FORMATS.contains(&format) {
+                continue;
+            }
+            let Ok(handle) = GetClipboardData(format) else { continue };
+            let block = HGLOBAL(handle.0);
+            let size = GlobalSize(block);
+            if size == 0 {
+                continue;
+            }
+            total += size;
+            if total > SNAPSHOT_MAX {
+                return None;
+            }
+            let ptr = GlobalLock(block) as *const u8;
+            if ptr.is_null() {
+                continue;
+            }
+            formats.push((format, std::slice::from_raw_parts(ptr, size).to_vec()));
+            let _ = GlobalUnlock(block);
+        }
+        Some(Snapshot(formats))
+    }
+
+    /// Put it all back. An empty snapshot leaves the clipboard empty, as it was.
+    pub fn restore(&self) -> windows::core::Result<()> {
+        let _guard = ClipboardGuard::open()?;
+        unsafe {
+            EmptyClipboard()?;
+            for (format, bytes) in &self.0 {
+                let _ = set_locked(*format, bytes);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Caller must hold the clipboard open. The block belongs to the clipboard once it is set.
+unsafe fn set_locked(format: u32, bytes: &[u8]) -> windows::core::Result<()> {
+    let block: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1))?;
+    let ptr = GlobalLock(block) as *mut u8;
+    if ptr.is_null() {
+        let _ = GlobalFree(Some(block));
+        return Err(windows::core::Error::from_thread());
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    let _ = GlobalUnlock(block);
+    if let Err(e) = SetClipboardData(format, Some(HANDLE(block.0))) {
+        let _ = GlobalFree(Some(block));
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Put `text` on the clipboard, returning everything that was there so it can be restored.
+/// Fails rather than lose the user's clipboard when it cannot be saved first.
+fn clipboard_swap(text: &str) -> windows::core::Result<Snapshot> {
+    wait_for_restore();
+    let _guard = ClipboardGuard::open()?;
+    unsafe {
+        let Some(previous) = Snapshot::take_locked() else {
+            crate::shell_log!("the clipboard holds too much to set aside; typing instead of pasting");
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(0x8007000Eu32 as i32)));
+        };
+        let wide: Vec<u8> =
+            text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+        EmptyClipboard()?;
+        set_locked(CF_UNICODETEXT.0 as u32, &wide)?;
+        mark_private_locked();
+        Ok(previous)
+    }
+}
+
+/// Clipboard formats Windows reads to keep an item out of clipboard history (Win+V) and the
+/// cloud clipboard. A dictation passes through the clipboard for a moment on its way into a
+/// paste; it is the user's words, not something they copied, and must not be kept there.
+unsafe fn mark_private_locked() {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    let format = |name: &str| {
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        RegisterClipboardFormatW(windows::core::PCWSTR(wide.as_ptr()))
+    };
+    let zero = 0u32.to_le_bytes();
+    for (name, bytes) in [
+        ("ExcludeClipboardContentFromMonitorProcessing", &zero[..]),
+        ("CanIncludeInClipboardHistory", &zero[..]),
+        ("CanUploadToCloudClipboard", &zero[..]),
+    ] {
+        let id = format(name);
+        if id != 0 {
+            let _ = set_locked(id, bytes);
+        }
+    }
+}
+
+/// Put `text` on the clipboard for the user to paste themselves, kept out of clipboard history.
+pub fn copy_private(text: &str) -> windows::core::Result<()> {
+    wait_for_restore();
+    let _guard = ClipboardGuard::open()?;
+    unsafe {
+        let wide: Vec<u8> = text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+        EmptyClipboard()?;
+        set_locked(CF_UNICODETEXT.0 as u32, &wide)?;
+        mark_private_locked();
+    }
+    Ok(())
 }
 
 /// Caller must already hold the clipboard open.
@@ -580,8 +947,12 @@ unsafe fn clipboard_get_locked() -> Option<String> {
     if ptr.is_null() {
         return None;
     }
+    // Bounded by the block's own size rather than a fixed limit: text cut off at a limit would
+    // come back as a selection shorter than the real one, and command mode would paste its
+    // edit of that over everything the user had selected.
+    let units = GlobalSize(hglobal) / 2;
     let mut len = 0usize;
-    while *ptr.add(len) != 0 && len < 4 * 1024 * 1024 {
+    while len < units && *ptr.add(len) != 0 {
         len += 1;
     }
     let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));

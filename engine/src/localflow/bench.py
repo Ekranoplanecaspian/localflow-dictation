@@ -330,7 +330,7 @@ def print_summary(r: RunResult, path: Path | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-def stream(cfg: Config, set_name: str = "own", limit: int | None = None) -> RunResult | None:
+def stream(cfg: Config, set_name: str = "own", limit: int | None = None, probe=None) -> RunResult | None:
     """The phase-1 KPI: stream each file through a real engine process at real-time pace, as the
     tray app does, and measure release-to-final latency and the accuracy of the final text."""
     import threading
@@ -348,10 +348,16 @@ def stream(cfg: Config, set_name: str = "own", limit: int | None = None) -> RunR
     client = EngineClient("bench-stream")
     t0 = time.perf_counter()
     client.connect(*proc.start())
+    if probe:  # the performance record (perfrecord.py) watches memory and times the loads
+        probe.started(proc.pid)
     ready, done = threading.Event(), threading.Event()
     result: dict = {}
 
     def on_status(st):
+        if probe and st.get("stt", {}).get("state") == "ready":
+            probe.ready("speech")
+        if probe and st.get("llm", {}).get("state") == "ready":
+            probe.ready("cleanup")
         if st.get("stt", {}).get("state") in ("ready", "error"):
             result["status"] = st
             ready.set()
@@ -430,6 +436,32 @@ def stream(cfg: Config, set_name: str = "own", limit: int | None = None) -> RunR
 
 
 CLEANUP_CASES = BENCH_DIR / "cleanup_cases.jsonl"
+COMMAND_CASES = BENCH_DIR / "command_cases.jsonl"
+
+
+def check_command(case: dict, result) -> list[str]:
+    """What a command-mode result got wrong, by the case's objective checks. Empty = pass.
+
+    The checks are deliberately about substance rather than style: the facts and names that
+    have to survive a rewrite, the day a translation must name, the line count of a list. A
+    refused edit fails, because the user asked for a change and got none."""
+    text = result.text
+    problems = []
+    if not result.changed:
+        problems.append(f"no change ({result.rejected or 'unchanged'})")
+        return problems
+    low = text.lower()
+    for want in case.get("contains", []):
+        if want.lower() not in low:
+            problems.append(f"missing {want!r}")
+    for bad in case.get("must_not", []):
+        if bad.lower() in f" {low} ":
+            problems.append(f"contains {bad!r}")
+    if "min_lines" in case and len([ln for ln in text.splitlines() if ln.strip()]) < case["min_lines"]:
+        problems.append(f"fewer than {case['min_lines']} lines")
+    if "max_ratio" in case and len(text) > case["max_ratio"] * len(case["selection"]):
+        problems.append(f"not shorter ({len(text)} vs {len(case['selection'])} chars)")
+    return problems
 
 
 def _norm_text(t: str) -> str:
@@ -469,6 +501,9 @@ def cleanup(cfg: Config, model_key: str | None = None, rules_only: bool = False,
     rejected = 0
     lat: list[float] = []
     edits: list[float] = []
+    command_pass = 0
+    command_ms: list[float] = []
+    command_cases = [json.loads(line) for line in COMMAND_CASES.read_text(encoding="utf-8").splitlines() if line.strip()]
     try:
         for case in cases:
             pipe = CleanupPipeline(PostProcessConfig(**{**pp.__dict__, "dictionary_terms": case.get("dictionary", [])}), provider)
@@ -491,6 +526,20 @@ def cleanup(cfg: Config, model_key: str | None = None, rules_only: bool = False,
                 print(f"  {flag} {case['id']:<14}{extra}")
                 if not ok or bad:
                     print(f"       want: {want!r}\n       got:  {got!r}" + (f"\n       must not contain: {bad}" if bad else ""))
+        if provider:
+            from localflow.cleanup.command import CommandRunner
+
+            if show:
+                print("  command mode:")
+            for case in command_cases:
+                res = CommandRunner(provider).run(case["selection"], case["instruction"])
+                problems = check_command(case, res)
+                command_pass += not problems
+                if res.ms is not None:
+                    command_ms.append(res.ms)
+                if show:
+                    print(f"  {'ok  ' if not problems else 'FAIL'} {case['id']:<14}"
+                          + (f" {'; '.join(problems)}\n       got:  {res.text!r}" if problems else ""))
     finally:
         if server:
             server.stop()
@@ -501,10 +550,15 @@ def cleanup(cfg: Config, model_key: str | None = None, rules_only: bool = False,
         "llm_ms_p50": round(statistics.median(lat)) if lat else None,
         "llm_ms_p95": round(float(np.percentile(lat, 95))) if lat else None,
         "model": "rules" if rules_only else f"{pp.llm_provider}:{pp.llm_model}",
+        "command_cases": len(command_cases) if provider else 0,
+        "command_pass": command_pass,
+        "command_ms_p50": round(statistics.median(command_ms)) if command_ms else None,
     }
     print(f"\ncleanup set ({summary['model']}): {exact}/{n} exact ({summary['exact_pct']} %), {violations} must-not violations, "
           f"mean word error {summary['word_error_pct']} %" + (f", LLM p50/p95 {summary['llm_ms_p50']}/{summary['llm_ms_p95']} ms, "
-                                                              f"used {used}, rejected {rejected}" if lat else ""))
+                                                              f"used {used}, rejected {rejected}" if lat else "")
+          + (f"; command mode {command_pass}/{len(command_cases)} "
+             f"(p50 {summary['command_ms_p50']} ms)" if provider else ""))
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = RESULTS_DIR / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-cleanup.json"
     out.write_text(json.dumps(summary, indent=2), encoding="utf-8")

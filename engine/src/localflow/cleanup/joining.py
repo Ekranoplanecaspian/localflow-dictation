@@ -149,11 +149,16 @@ def strip_echo(before: str, text: str) -> str:
     return text
 
 
-def join(before: str | None, text: str) -> str:
+def join(before: str | None, text: str, *, from_model: bool = False) -> str:
     """Adjust `text` so it reads correctly inserted at a caret preceded by `before`.
 
     Returns the text with its leading space and its first letter's case settled. Everything
     else - punctuation, the words themselves - is left exactly as clean-up produced it.
+
+    `from_model`: the language model wrote `text`, having been shown `before`. Only then can
+    the start of `text` be an echo of `before`. Otherwise the words are the speaker's own, and
+    repeating what is already there is something people really say: dictating "Thanks so much
+    for the help" after "Thanks so much." used to come out as "for the help".
     """
     if not text:
         return text
@@ -161,7 +166,7 @@ def join(before: str | None, text: str) -> str:
     if not before.strip():
         return text
 
-    out = strip_echo(before, text)
+    out = strip_echo(before, text) if from_model else text
     if continues_sentence(before):
         out = lower_first(out)
     if needs_space(before):

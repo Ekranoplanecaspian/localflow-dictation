@@ -7,15 +7,16 @@ virtualenv when it is missing, so a packaged build is simply one where this exis
 Two things PyInstaller cannot work out by itself:
 
 * **onnxruntime's native libraries.** The Python package is a thin wrapper around DLLs that are
-  loaded by name at runtime, and the CUDA execution provider pulls in the nvidia-* wheels on top
-  of that. None of it appears in an import graph.
+  loaded by name at runtime. None of it appears in an import graph.
 * **onnx_asr's model registry.** Backends are looked up by name from a table, so nothing
   imports `onnx_asr.models.parakeet` directly and PyInstaller leaves it out - the engine then
   starts happily and fails the moment it is asked to load a model.
 
 Everything else the engine needs at runtime is downloaded on first use and lives in
 `%LOCALAPPDATA%\\LocalFlow`, not in here: the speech model, the clean-up model and llama-server
-are gigabytes each and have their own resumable download path.
+are gigabytes each and have their own resumable download path. So are the CUDA libraries speech
+needs on an NVIDIA card (cuDNN, cuBLAS, cuFFT: 1.5 GB, most of what this used to weigh), which
+only an NVIDIA PC fetches (localflow/cudalibs.py, B2) - they are kept out of here on purpose.
 
 Build it with `python -m PyInstaller localflow-engine.spec --noconfirm` from `engine/`.
 """
@@ -33,17 +34,13 @@ from PyInstaller.utils.hooks import (
 binaries = collect_dynamic_libs("onnxruntime")
 datas = collect_data_files("onnxruntime")
 
-# The CUDA runtime, cuBLAS, cuDNN and friends ship as separate wheels whose DLLs onnxruntime
-# loads by name. Missing one of these does not fail the build - it fails at the first attempt
-# to use the GPU, which then silently falls back to the CPU and looks like a performance bug.
-for package in (
-    "nvidia",
-    "onnxruntime_gpu",
-):
-    try:
-        binaries += collect_dynamic_libs(package)
-    except Exception:  # noqa: BLE001 - a CPU-only build simply has none of these
-        pass
+# onnxruntime-gpu's own CUDA execution provider (a few hundred MB) stays: it is what loads the
+# CUDA libraries once an NVIDIA PC has downloaded them. The libraries themselves (the nvidia-*
+# wheels) do not: see the note at the top, and the filter after Analysis below.
+try:
+    binaries += collect_dynamic_libs("onnxruntime_gpu")
+except Exception:  # noqa: BLE001 - a CPU-only onnxruntime has none
+    pass
 
 # sounddevice carries the PortAudio DLL the benchmark's recorder needs.
 binaries += collect_dynamic_libs("sounddevice")
@@ -56,7 +53,11 @@ hiddenimports = [
     "onnxruntime",
     "onnxruntime.capi",
     "onnxruntime.capi.onnxruntime_pybind11_state",
-    # Chosen from config at runtime.
+    # Every module of the engine itself. Several are imported inside functions (a backend
+    # chosen from config, the download progress bridge, the model catalogue), and a
+    # hand-kept list of them is exactly what goes stale the next time one is added.
+    *collect_submodules("localflow"),
+    # Chosen from config at runtime (kept explicit as documentation; the line above covers them).
     "localflow.stt.parakeet",
     "localflow.stt.whisper",
     "localflow.stt.whisper_onnx",
@@ -94,6 +95,8 @@ excludes = [
     "pandas",
     "scipy",
     "faster_whisper",
+    # NVIDIA's CUDA libraries: downloaded by NVIDIA PCs instead (B2)
+    "nvidia",
 ]
 
 a = Analysis(
@@ -109,6 +112,14 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Whatever a hook still brought in from the nvidia-* wheels goes too, so the installer can never
+# quietly grow back to 1.8 GB.
+def _not_nvidia(entries):
+    return [e for e in entries if not e[0].replace("\\", "/").lower().startswith("nvidia/")]
+
+
+a.binaries = _not_nvidia(a.binaries)
+a.datas = _not_nvidia(a.datas)
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -131,7 +142,7 @@ exe = EXE(
     entitlements_file=None,
 )
 
-# One directory, not one file: a single-file build unpacks a gigabyte of CUDA libraries to a
+# One directory, not one file: a single-file build unpacks a few hundred MB of onnxruntime to a
 # temporary folder on every single launch, which would add seconds to every start-up.
 coll = COLLECT(
     exe,

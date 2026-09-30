@@ -1,0 +1,50 @@
+{
+  "version": "0.2.0",
+  "commit": "16e2e50+dirty",
+  "date": "2026-09-24 00:06",
+  "machine": {
+    "cpu": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+    "cores": 12,
+    "threads": 24,
+    "ram_gb": 31,
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "vram_mb": 8188,
+    "gpu_driver": "610.62",
+    "windows": "10.0.26200"
+  },
+  "models": {
+    "speech": "nemo-parakeet-tdt-0.6b-v3",
+    "speech_device": "cuda",
+    "speech_precision": "fp32",
+    "cleanup": "bundled:qwen3-4b"
+  },
+  "startup": {
+    "speech_ready_s": 3.34,
+    "cleanup_ready_s": 3.01
+  },
+  "latency": {
+    "keyup_to_text_p50_ms": 344.7,
+    "keyup_to_text_p95_ms": 441.4,
+    "takes": 30,
+    "audio_s": 168.2
+  },
+  "accuracy": {
+    "wer_pct": 5.51,
+    "set": "own"
+  },
+  "memory": {
+    "engine_private_mb": 5442,
+    "cleanup_private_mb": 3367,
+    "vram_mb": 5871
+  },
+  "cleanup": {
+    "cases": 30,
+    "exact": 22,
+    "violations": 0,
+    "word_error_pct": 3.3,
+    "llm_ms_p50": 219,
+    "llm_ms_p95": 378,
+    "command_pass": 12,
+    "command_cases": 12
+  }
+}

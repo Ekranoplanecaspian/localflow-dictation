@@ -31,6 +31,15 @@ export function Voice({ data, onChange, say }: SectionProps) {
     const [autostart, setAutostart] = useState(false);
 
     useEffect(() => setSettings(data.settings), [data.settings]);
+    const bluetooth = new Set(data.bluetooth_microphones ?? []);
+    // The one chosen, or with "System default", the one the microphone status says is in use.
+    const mic = data.health?.parts.find((p) => p.id === "microphone");
+    const listening = settings.microphone
+        ? data.microphones.find((m) => m.toLowerCase().includes(settings.microphone.toLowerCase()))
+        : mic?.level === "ok"
+          ? mic.summary
+          : undefined;
+    const onBluetooth = listening !== undefined && bluetooth.has(listening);
     useEffect(() => {
         void invoke<{ autostart: boolean }>("shell_status").then((s) => setAutostart(s.autostart));
     }, [data]);
@@ -176,10 +185,17 @@ export function Voice({ data, onChange, say }: SectionProps) {
                     <option value="">System default</option>
                     {data.microphones.map((m) => (
                         <option key={m} value={m}>
-                            {m}
+                            {bluetooth.has(m) ? `${m} — Bluetooth` : m}
                         </option>
                     ))}
                 </select>
+                {onBluetooth && (
+                    <p className="note">
+                        This is a Bluetooth headset. Using its microphone switches it to call quality:
+                        speech is heard less clearly, and music in the headphones drops to mono. A
+                        built-in or USB microphone usually recognises you better.
+                    </p>
+                )}
                 <p className="note">
                     Recording is always on in the background so the half second before you press the
                     hotkey is not lost. Nothing is sent anywhere until you hold the chord.

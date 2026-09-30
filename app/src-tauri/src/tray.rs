@@ -10,6 +10,8 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::guard::LockExt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     /// The engine is starting or loading models.
@@ -20,8 +22,9 @@ pub enum State {
     Recording,
     /// Transcribing and cleaning up.
     Processing,
-    /// The engine is not there.
-    Offline,
+    /// Working, but something needs attention (clean-up unavailable, safe mode).
+    Degraded,
+    /// Dictation cannot work right now.
     Error,
 }
 
@@ -32,7 +35,7 @@ impl State {
             State::Idle => [0x8b, 0x6c, 0xff],   // the LocalFlow accent
             State::Recording => [0x3d, 0xd6, 0x8c],
             State::Processing => [0xff, 0xb3, 0x4d],
-            State::Offline => [0x77, 0x77, 0x80],
+            State::Degraded => [0xe0, 0xa6, 0x4a],
             State::Error => [0xff, 0x5c, 0x5c],
         }
     }
@@ -43,8 +46,8 @@ impl State {
             State::Idle => "LocalFlow - ready",
             State::Recording => "LocalFlow - listening",
             State::Processing => "LocalFlow - transcribing",
-            State::Offline => "LocalFlow - engine offline",
-            State::Error => "LocalFlow - error",
+            State::Degraded => "LocalFlow - needs attention",
+            State::Error => "LocalFlow - not working",
         }
     }
 }
@@ -83,15 +86,18 @@ fn icon(state: State) -> Image<'static> {
     Image::new_owned(rgba, SIZE, SIZE)
 }
 
-pub struct Tray {
+pub struct Tray<R: Runtime> {
     state: Mutex<State>,
     /// The one-line explanation shown under the state in the tooltip.
     detail: Mutex<String>,
+    /// "Restart engine", which reads "Leave safe mode" while the engine is in safe mode.
+    restart: MenuItem<R>,
 }
 
 /// Build the tray icon and its menu. Kept in app state so the rest of the shell can update it.
 pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open LocalFlow", true, None::<&str>)?;
+    let paste_last = MenuItem::with_id(app, "paste_last", "Paste last dictation\tWin+Alt+V", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "Restart engine", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
         app,
@@ -103,10 +109,12 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let autostart_item = autostart.clone();
+    let restart_item = restart.clone();
     let menu = Menu::with_items(
         app,
         &[
             &open,
+            &paste_last,
             &restart,
             &PredefinedMenuItem::separator(app)?,
             &autostart,
@@ -122,6 +130,10 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "open" => show_window(app),
+            // Handled in lib.rs, which waits for the menu to give the focus back first.
+            "paste_last" => {
+                let _ = tauri::Emitter::emit(app, "paste-last-request", ());
+            }
             "restart" => {
                 if let Some(engine) = app.try_state::<crate::engine::Engine>() {
                     engine.restart();
@@ -142,11 +154,11 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    app.manage(Tray { state: Mutex::new(State::Loading), detail: Mutex::new(String::new()) });
+    app.manage(Tray { state: Mutex::new(State::Loading), detail: Mutex::new(String::new()), restart: restart_item });
     Ok(())
 }
 
-fn show_window<R: Runtime>(app: &AppHandle<R>) {
+pub fn show_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -156,13 +168,13 @@ fn show_window<R: Runtime>(app: &AppHandle<R>) {
 
 /// Update the icon, its tooltip, and the detail line shown in the window.
 pub fn set_state<R: Runtime>(app: &AppHandle<R>, state: State, detail: Option<&str>) {
-    if let Some(tray) = app.try_state::<Tray>() {
-        let mut current = tray.state.lock().unwrap();
+    if let Some(tray) = app.try_state::<Tray<R>>() {
+        let mut current = tray.state.locked();
         let same = *current == state;
         *current = state;
         drop(current);
         if let Some(d) = detail {
-            *tray.detail.lock().unwrap() = d.to_owned();
+            *tray.detail.locked() = d.to_owned();
         }
         if same && detail.is_none() {
             return;
@@ -175,5 +187,12 @@ pub fn set_state<R: Runtime>(app: &AppHandle<R>, state: State, detail: Option<&s
             _ => state.label().to_owned(),
         };
         let _ = icon_handle.set_tooltip(Some(&tip));
+    }
+}
+
+/// Safe mode is left by restarting the engine, so the restart item says that while it is on.
+pub fn set_safe_mode<R: Runtime>(app: &AppHandle<R>, on: bool) {
+    if let Some(tray) = app.try_state::<Tray<R>>() {
+        let _ = tray.restart.set_text(if on { "Leave safe mode" } else { "Restart engine" });
     }
 }

@@ -11,12 +11,13 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::engine::{Engine, Sink};
+use crate::guard::LockExt;
 
 struct ChannelSink(Mutex<Sender<(String, Value)>>);
 
 impl Sink for ChannelSink {
     fn emit(&self, event: &str, payload: Value) {
-        let _ = self.0.lock().unwrap().send((event.to_owned(), payload));
+        let _ = self.0.locked().send((event.to_owned(), payload));
     }
 }
 
@@ -435,6 +436,7 @@ pub fn report() -> i32 {
     let ready = wait_for_ready(&engine, &rx, Duration::from_secs(240));
     let mut ctx = crate::context::foreground();
     crate::context::enrich(&mut ctx);
+    crate::context::add_url(&mut ctx);
     let sample = "LocalFlow injection self-test 1 2 3.";
     let out = json!({
         "ready": ready,

@@ -122,10 +122,21 @@ function useWaveform(active: boolean) {
                     el.style.height = `${BAR_MIN + Math.min(1, heights[i]) * (BAR_MAX - BAR_MIN)}px`;
                 }
             }
+            // Once a take is over and the bars have fallen still, stop until the next one. It
+            // ran sixty frames a second all day: the bar's window is hidden, not closed, so the
+            // page never learns nobody is looking, and that loop was most of LocalFlow's idle
+            // processor use.
+            const still = smoothed < 1e-3 && heights.every((h, i) => h < 1e-3 && Math.abs(velocity[i]) < 1e-3);
+            if (!active && still) {
+                raf = 0;
+                return;
+            }
             raf = requestAnimationFrame(frame);
         };
         raf = requestAnimationFrame(frame);
-        return () => cancelAnimationFrame(raf);
+        return () => {
+            if (raf) cancelAnimationFrame(raf);
+        };
     }, [active]);
 
     // The demo route needs to drive the level directly.
@@ -181,7 +192,8 @@ function tail(text: string, max = 300) {
 }
 
 /**
- * `#flowbar?demo=recording` renders the bar outside Tauri with made-up input.
+ * `#flowbar?demo=recording` renders the bar outside Tauri with made-up input. Development builds
+ * only: a release build compiles it out.
  *
  * The bar only ever appears for a second or two on top of another application, which makes it
  * the hardest part of the app to look at properly - and the first version shipped with the
@@ -192,18 +204,29 @@ function useDemo(
     setPhase: (p: Phase) => void,
     setText: (t: string) => void,
     setNotice: (n: boolean) => void,
+    setTag: (t: string) => void,
     level: React.MutableRefObject<number>,
 ) {
-    const demo = new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("demo");
+    const demo = import.meta.env.DEV
+        ? new URLSearchParams(window.location.hash.split("?")[1] ?? "").get("demo")
+        : null;
     useEffect(() => {
         if (!demo) return;
-        // The notice is not a take: no waveform, no session, just the line.
-        if (demo === "warming") {
+        // A notice is not a take: no waveform, no session, just the line.
+        const notices: Record<string, string> = {
+            warming: "Warming up — try again in a moment",
+            restarting: "Engine restarting — try again in a moment",
+            "no-mic": "Microphone unavailable — see LocalFlow",
+            off: "Dictation is off in slack",
+        };
+        if (notices[demo]) {
             setPhase("idle");
             setNotice(true);
-            setText("Warming up — try again in a moment");
+            setText(notices[demo]);
             return;
         }
+        // `demo=tag`: a take whose engine went away mid-sentence; the words go on.
+        if (demo === "tag") setTag("Engine restarting — your words are kept");
         setPhase(demo === "transcribing" ? "finishing" : "recording");
         if (demo !== "listening") {
             setText(
@@ -222,7 +245,7 @@ function useDemo(
             );
         }, 20);
         return () => clearInterval(timer);
-    }, [demo, setPhase, setText, setNotice, level]);
+    }, [demo, setPhase, setText, setNotice, setTag, level]);
     return Boolean(demo);
 }
 
@@ -233,8 +256,12 @@ export default function FlowBar() {
     // A notice ("warming up") is not a transcript: it is short, it fits, and it reads
     // centred rather than pinned to the right edge where the newest words belong.
     const [notice, setNotice] = useState(false);
+    // A problem with the take in hand ("Engine restarting — your words are kept").
+    const [tag, setTag] = useState("");
+    // Spoken into a password field: dots, never the words, on a bar anyone can see.
+    const [hidden, setHidden] = useState(false);
     const bars = useWaveform(phase === "recording");
-    const demo = useDemo(setPhase, setText, setNotice, bars.level);
+    const demo = useDemo(setPhase, setText, setNotice, setTag, bars.level);
     const caption = useRef<HTMLDivElement>(null);
     const [clipped, setClipped] = useState(false);
 
@@ -275,8 +302,11 @@ export default function FlowBar() {
                     setWide(false);
                     setError(false);
                     setNotice(false);
+                    setTag("");
+                    setHidden(false);
                 }
             }),
+            subscribe("take-private", () => setHidden(true)),
             // A partial from a session we have not seen means the phase event is late (a
             // hidden webview is throttled). Adopt it rather than drop it: the shell only ever
             // runs one dictation at a time, so the newest id is always the right one.
@@ -298,26 +328,25 @@ export default function FlowBar() {
                 if (shown) setText(shown);
             }),
             subscribe("engine-error", () => setError(true)),
-            // Pressed the hotkey while the model was still loading. Nothing was recorded, and
-            // the bar is the only place that can say so without stealing focus.
-            subscribe<{ app?: string }>("app-disabled", (p) => {
+            // The hotkey was pressed and no take could start: the shell says why (the engine
+            // restarting, the speech model loading, no microphone, dictation off in this app).
+            // Nothing was recorded, and the bar is the only place that can say so without
+            // stealing focus.
+            subscribe<{ text: string }>("notice", (p) => {
                 session.current = null;
                 stabiliser.current.reset();
                 setError(false);
+                setTag("");
                 setPhase("idle");
                 setWide(true);
                 setNotice(true);
-                const name = (p.app ?? "").replace(/\.exe$/i, "");
-                setText(name ? `Dictation is off in ${name}` : "Dictation is off in this app");
+                setText(p.text);
             }),
-            subscribe("engine-warming", () => {
-                session.current = null;
-                stabiliser.current.reset();
-                setError(false);
-                setPhase("idle");
+            // Something went wrong with the take being spoken, which goes on: said beside the
+            // words rather than instead of them.
+            subscribe<{ text: string }>("take-notice", (p) => {
+                setTag(p.text);
                 setWide(true);
-                setNotice(true);
-                setText("Warming up — try again in a moment");
             }),
             subscribe("cancelled", () => {
                 session.current = null;
@@ -348,9 +377,10 @@ export default function FlowBar() {
             </div>
             {text && (
                 <div className="caption" ref={caption}>
-                    {tail(text)}
+                    {hidden && !notice ? "•".repeat(Math.min(12, Math.max(3, text.length))) : tail(text)}
                 </div>
             )}
+            {tag && <div className="tag">{tag}</div>}
         </div>
     );
 }

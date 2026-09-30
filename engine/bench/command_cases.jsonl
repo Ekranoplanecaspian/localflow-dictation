@@ -1,0 +1,12 @@
+{"id": "formal", "instruction": "make this more formal", "selection": "hey can u send me the report asap thx", "contains": ["report"], "must_not": [" u ", "thx", "asap"]}
+{"id": "bullets", "instruction": "turn this into a bulleted list", "selection": "We need milk, eggs, bread and coffee.", "contains": ["milk", "eggs", "bread", "coffee"], "min_lines": 4}
+{"id": "shorter", "instruction": "make this shorter", "selection": "I wanted to reach out and let you know that, after a lot of back and forth with the team over the last couple of weeks, we have finally decided that we are going to move the launch from the end of this month to the middle of next month.", "max_ratio": 0.7, "contains": ["launch"]}
+{"id": "grammar", "instruction": "fix the grammar and spelling", "selection": "their going to the park tomorow and they was really happy about it", "contains": ["They're", "tomorrow", "were"]}
+{"id": "spanish", "instruction": "translate this into Spanish", "selection": "The meeting is on Tuesday at three in the afternoon.", "contains": ["martes", "tres"]}
+{"id": "french", "instruction": "translate this into French", "selection": "Please call me on Friday about the invoice.", "contains": ["vendredi", "facture"]}
+{"id": "facts", "instruction": "make this friendlier", "selection": "Invoice 4471 for $2,350 is due on March 3.", "contains": ["4471", "2,350", "March 3"]}
+{"id": "title-case", "instruction": "make this title case", "selection": "the quick brown fox jumps over the lazy dog", "contains": ["Quick Brown Fox Jumps"]}
+{"id": "no-answer", "instruction": "make this more polite", "selection": "What is the capital of France?", "contains": ["?"], "must_not": ["Paris"]}
+{"id": "email", "instruction": "turn this into a short email to the team", "selection": "running late, start the standup without me", "contains": ["late"], "must_not": ["[", "]"]}
+{"id": "active", "instruction": "rewrite this in the active voice", "selection": "The report was written by Priya and reviewed by Tom.", "contains": ["Priya wrote", "Tom reviewed"]}
+{"id": "names", "instruction": "make this sound more exciting", "selection": "Arnab and Okonkwo will present the Q3 numbers on Thursday.", "contains": ["Arnab", "Okonkwo", "Q3", "Thursday"]}

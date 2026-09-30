@@ -1,3 +1,4 @@
+import { HEALTH_SAMPLES } from "./sampleHealth";
 import type { HubData } from "./types";
 
 /**
@@ -13,6 +14,7 @@ import type { HubData } from "./types";
  * are the states that break a layout.
  */
 export const SAMPLE: HubData = {
+    version: "0.2.0",
     settings: {
         hotkey: ["ctrl", "win"],
         double_tap_hands_free: true,
@@ -47,11 +49,183 @@ export const SAMPLE: HubData = {
         },
     },
     engine: {
-        stt: { state: "ready", backend: "parakeet", model: "nemo-parakeet-tdt-0.6b-v3", device: "cuda", precision: "fp32" },
-        llm: { state: "ready", provider: "bundled", model: "qwen3-4b", enabled: true },
-        version: "0.1.0",
+        stt: {
+            state: "ready",
+            backend: "auto",
+            model: "nemo-parakeet-tdt-0.6b-v3",
+            key: "parakeet-v3",
+            label: "Parakeet v3",
+            device: "cuda",
+            precision: "fp32",
+            // mid-download, because that is the state with the most to lay out
+            switch: { to: "parakeet-v2", state: "downloading", progress: 0.42, error: null },
+            choices: [
+                {
+                    key: "parakeet-v3",
+                    label: "Parakeet v3",
+                    blurb: "The best all-rounder: the most accurate in our tests and the fastest on a graphics card. Knows 25 European languages and works out which one you are speaking.",
+                    languages: 25,
+                    size_gb: 2.6,
+                    installed: true,
+                    current: true,
+                    recommended: true,
+                    speed: 5,
+                    accuracy: 5,
+                },
+                {
+                    key: "parakeet-v2",
+                    label: "Parakeet v2",
+                    blurb: "English only. Excellent on clear, read-aloud English, but less forgiving of accents than v3.",
+                    languages: 1,
+                    size_gb: 2.5,
+                    installed: false,
+                    current: false,
+                    recommended: false,
+                    speed: 5,
+                    accuracy: 4,
+                },
+                {
+                    key: "parakeet-v3-compact",
+                    label: "Parakeet v3 Compact",
+                    blurb: "A quarter of the download and a third of the memory. For computers without an NVIDIA graphics card, where it is quicker than v3; a little less accurate.",
+                    languages: 25,
+                    size_gb: 0.7,
+                    installed: true,
+                    current: false,
+                    recommended: false,
+                    speed: 1,
+                    accuracy: 3,
+                },
+                {
+                    key: "whisper-turbo",
+                    label: "Whisper Large v3 Turbo",
+                    blurb: "OpenAI's model, for 99 languages. About half the speed of Parakeet on a graphics card, and far too slow without one.",
+                    languages: 99,
+                    size_gb: 1.6,
+                    installed: true,
+                    current: false,
+                    recommended: false,
+                    speed: 3,
+                    accuracy: 4,
+                },
+            ],
+        },
+        llm: {
+            state: "ready",
+            provider: "bundled",
+            model: "qwen3-4b",
+            label: "Qwen3 4B",
+            enabled: true,
+            switch: null,
+            choices: [
+                {
+                    key: "qwen3-4b",
+                    label: "Qwen3 4B",
+                    blurb: "The most careful editor in our tests: the most exact clean-ups, never undid one of your corrections, and handled every command-mode rewrite.",
+                    size_gb: 2.5,
+                    installed: true,
+                    current: true,
+                    recommended: true,
+                    speed: 3,
+                    accuracy: 5,
+                },
+                {
+                    key: "phi-4-mini",
+                    label: "Phi-4 mini",
+                    blurb: "Twice as fast and just as careful with your corrections, but a plainer editor and weaker at command-mode rewrites.",
+                    size_gb: 2.5,
+                    installed: true,
+                    current: false,
+                    recommended: false,
+                    speed: 5,
+                    accuracy: 4,
+                },
+                {
+                    key: "gemma-4-e2b",
+                    label: "Gemma 4 E2B",
+                    blurb: "Fast, and good at command-mode rewrites. Sometimes leaves numbers spelled out (\"two point four million\"), and the largest download.",
+                    size_gb: 3.4,
+                    installed: true,
+                    current: false,
+                    recommended: false,
+                    speed: 5,
+                    accuracy: 3,
+                },
+            ],
+        },
+        // warm, with clean-up already moved off the GPU: the state with the most to lay out
+        compute: {
+            mode: "adaptive",
+            temp_limit_c: 80,
+            idle_release_min: 10,
+            level: "light",
+            reason: "graphics card at 82 °C",
+            speech: "cuda",
+            cleanup: "vulkan",
+            cleanup_off_card: "vulkan",
+            vulkan: "Built-in graphics",
+            keep_warm: false,
+            moving: null,
+            gpu: {
+                name: "RTX 4060 Laptop GPU",
+                temp_c: 82,
+                util_pct: 64,
+                mem_used_mb: 4105,
+                mem_total_mb: 8188,
+                slowdown_c: 91,
+            },
+            auto: { speech: true, cleanup: true },
+            chosen: {
+                speech: {
+                    key: "parakeet-v3",
+                    label: "Parakeet v3",
+                    why: "the most accurate, and quick enough on the graphics card (0.04 s per second of speech, measured)",
+                },
+                cleanup: {
+                    key: "qwen3-4b",
+                    label: "Qwen3 4B",
+                    why: "the most accurate, and quick enough on the processor (0.8 s per clean-up, measured)",
+                },
+            },
+            hardware: {
+                cpu_cores: 12,
+                ram_gb: 31.1,
+                vram_mb: 8188,
+                cpu: {
+                    name: "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+                    cores: 12,
+                    threads: 24,
+                    isa: ["sse4.2", "avx", "avx2", "avx512"],
+                },
+                gpus: [
+                    {
+                        name: "NVIDIA GeForce RTX 4060 Laptop GPU",
+                        vendor: "nvidia",
+                        dedicated_mb: 7956,
+                        shared_mb: 15932,
+                        integrated: false,
+                    },
+                    {
+                        name: "AMD Radeon(TM) 890M Graphics",
+                        vendor: "amd",
+                        dedicated_mb: 338,
+                        shared_mb: 15932,
+                        integrated: true,
+                    },
+                ],
+                ram_free_gb: 8.3,
+                disk_free_gb: 191,
+            },
+            recent: [
+                { at: Date.now() / 1000 - 240, what: "clean-up", to: "vulkan", reason: "graphics card at 82 °C" },
+                { at: Date.now() / 1000 - 5400, what: "speech", to: "cuda", reason: "graphics card is cool" },
+                { at: Date.now() / 1000 - 5400, what: "clean-up", to: "cuda", reason: "graphics card is cool" },
+            ],
+        },
+        version: "0.2.0",
     },
-    link: { link: "ready", detail: null, attached: false, pid: 4242, restarts: 0 },
+    link: { link: "ready", detail: null, attached: false, pid: 4242, restarts: 0, safe_mode: false },
+    health: HEALTH_SAMPLES.ok,
     stats: {
         dictations: 148,
         words: 5230,
@@ -103,6 +277,7 @@ export const SAMPLE: HubData = {
     ],
     history_total: 148,
     microphones: ["Microphone Array (Realtek(R) Audio)", "Headset (WH-1000XM4)"],
+    bluetooth_microphones: ["Headset (WH-1000XM4)"],
     suggestions: [
         { from: "kwen", to: "Qwen", seen: 7 },
         { from: "parakeet", to: "Parakeet", seen: 5 },
@@ -114,3 +289,47 @@ export const SAMPLE: HubData = {
         log: "C:\\Users\\you\\AppData\\Roaming\\LocalFlow\\shell.log",
     },
 };
+
+/** `#hub?demo=1&health=gpuprep`: an NVIDIA PC's first run, speech's CUDA libraries downloading. */
+export function gettingReady(): HubData {
+    const compute = SAMPLE.engine?.compute;
+    return {
+        ...SAMPLE,
+        engine: {
+            ...SAMPLE.engine,
+            compute: compute && {
+                ...compute,
+                level: "full",
+                reason: "graphics card is cool",
+                speech: "cpu",
+                cleanup: "cuda",
+                recent: [],
+                cuda_libs: { state: "downloading", done: 356_515_840, total: 1_071_985_899 },
+            },
+        },
+    };
+}
+
+/** `#hub?demo=1&ram=8`: the sample on a PC with that much memory, where clean-up starts off. */
+export function smallPc(ramGb: number): HubData {
+    const compute = SAMPLE.engine?.compute;
+    return {
+        ...SAMPLE,
+        engine_config: { postprocess: { ...SAMPLE.engine_config?.postprocess, llm_cleanup: false } },
+        engine: {
+            ...SAMPLE.engine,
+            compute: compute && {
+                ...compute,
+                hardware: compute.hardware && { ...compute.hardware, ram_gb: ramGb - 0.4, ram_free_gb: 2.1 },
+                chosen: {
+                    cleanup: null,
+                    speech: {
+                        key: "parakeet-v3-compact",
+                        label: "Parakeet v3 Compact",
+                        why: "Parakeet v3 needs about 3.0 GB of free memory, and 2.1 GB is free; this is the most accurate one that fits and keeps up on the processor (0.12 s per second of speech, estimated)",
+                    },
+                },
+            },
+        },
+    };
+}

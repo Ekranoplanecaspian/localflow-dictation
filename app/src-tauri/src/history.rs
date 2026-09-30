@@ -17,8 +17,6 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Entries older than this are dropped when the file is next read. 0 means keep everything.
-const DEFAULT_RETENTION_DAYS: u64 = 90;
 /// A dictation this long is almost certainly a mistake, and storing it helps nobody.
 const MAX_TEXT: usize = 8000;
 
@@ -57,10 +55,12 @@ fn now() -> u64 {
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Record one dictation. Does nothing when history is switched off.
-pub fn record(msg: &Value, app: &str, enabled: bool) {
+pub fn record(msg: &Value, app: &str, enabled: bool, retention_days: u64) {
     if !enabled {
         return;
     }
+    // An app left running for weeks still sheds old entries, not only one just started.
+    prune_if_due(retention_days);
     let text = msg.get("text").and_then(Value::as_str).unwrap_or("");
     if text.trim().is_empty() {
         return;
@@ -97,41 +97,91 @@ fn clip(s: &str) -> String {
     }
 }
 
+fn cutoff(retention_days: u64) -> u64 {
+    if retention_days == 0 {
+        0
+    } else {
+        now().saturating_sub(retention_days * 86_400)
+    }
+}
+
+/// The entries in `text` at or after `cutoff`, oldest first, as the file keeps them.
+fn parse_since(text: &str, cutoff: u64) -> Vec<Entry> {
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
+        .filter(|e| e.at >= cutoff)
+        .collect()
+}
+
 /// Every entry still within the retention window, newest first.
 pub fn load(retention_days: u64) -> Vec<Entry> {
     let Some(path) = path() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
-    let cutoff = if retention_days == 0 {
-        0
-    } else {
-        now().saturating_sub(retention_days * 86_400)
-    };
-    let mut entries: Vec<Entry> = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Entry>(line).ok())
-        .filter(|e| e.at >= cutoff)
-        .collect();
+    let mut entries = parse_since(&text, cutoff(retention_days));
     entries.reverse();
     entries
 }
 
-/// Drop anything past the retention window by rewriting the file.
+/// Delete everything past the retention window from the file itself.
+///
+/// Reading used to hide old entries while the file kept them for good: pruning only ran when
+/// the retention setting was changed, so a dictation from six months ago was still on disk in
+/// plain text under a 90-day setting. It now runs at start-up and once a day (`prune_if_due`).
 pub fn prune(retention_days: u64) {
-    if retention_days == 0 {
-        return;
+    if let Some(path) = path() {
+        if let Err(e) = prune_file(&path, cutoff(retention_days)) {
+            crate::shell_log!("could not prune the history: {e}");
+        }
     }
-    let Some(path) = path() else { return };
-    let kept = load(retention_days);
+}
+
+/// Rewrite `path` without the entries older than `cutoff`. Leaves the file untouched when
+/// nothing is due to go. Unreadable lines go too: nothing can show them.
+fn prune_file(path: &std::path::Path, cutoff: u64) -> std::io::Result<()> {
+    if cutoff == 0 {
+        return Ok(()); // keep everything
+    }
+    // Read under the lock as well as write: a dictation recorded in between would otherwise
+    // be erased by the rewrite.
     let _guard = WRITE_LOCK.lock();
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let kept = parse_since(&text, cutoff);
+    if kept.len() == text.lines().filter(|l| !l.trim().is_empty()).count() {
+        return Ok(());
+    }
     let mut out = String::new();
-    // `load` returns newest first; the file stays oldest first so appending is still correct.
-    for entry in kept.iter().rev() {
+    for entry in &kept {
         if let Ok(line) = serde_json::to_string(entry) {
             out.push_str(&line);
             out.push('\n');
         }
     }
-    let _ = std::fs::write(&path, out);
+    // Written aside and swapped in, so a crash part-way loses nothing.
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The day (since the epoch) this process last pruned the history.
+static PRUNED_ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Prune at most once a day, on a thread of its own: it rewrites the file, and callers include
+/// the path that delivers a dictation.
+pub fn prune_if_due(retention_days: u64) {
+    if retention_days == 0 {
+        return;
+    }
+    let today = now() / 86_400;
+    if PRUNED_ON.swap(today, std::sync::atomic::Ordering::Relaxed) == today {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("history-prune".into())
+        .spawn(move || prune(retention_days));
 }
 
 pub fn clear() -> bool {
@@ -256,6 +306,53 @@ mod tests {
             entry(now, 5, 500, "a.exe", false),
         ];
         assert_eq!(stats(&entries).p50_ms, 500);
+    }
+
+    fn history_file(name: &str, entries: &[Entry], extra: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("localflow-{name}-{}.jsonl", std::process::id()));
+        let mut text: String =
+            entries.iter().map(|e| serde_json::to_string(e).unwrap() + "\n").collect();
+        text.push_str(extra);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// The bug: entries past the retention window were hidden but never deleted from disk.
+    #[test]
+    fn pruning_deletes_old_entries_from_the_file_itself() {
+        let now = now();
+        let old = entry(now - 200 * 86_400, 3, 100, "slack.exe", false);
+        let recent = entry(now - 86_400, 5, 200, "code.exe", true);
+        let path = history_file("prune", &[old, recent], "not json at all\n");
+
+        prune_file(&path, now - 90 * 86_400).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let left = parse_since(&text, 0);
+        assert_eq!(left.len(), 1, "only the recent entry is left: {text:?}");
+        assert_eq!(left[0].app, "code.exe");
+        assert_eq!(text.lines().count(), 1, "the unreadable line is gone too");
+    }
+
+    #[test]
+    fn nothing_to_prune_leaves_the_file_alone_and_zero_keeps_everything() {
+        let now = now();
+        let path = history_file("keep", &[entry(now - 400 * 86_400, 1, 1, "a.exe", false)], "");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        prune_file(&path, 0).unwrap(); // retention 0: keep everything
+        prune_file(&path, now - 500 * 86_400).unwrap(); // nothing that old
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let left = parse_since(&std::fs::read_to_string(&path).unwrap(), 0).len();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(left, 1);
+        assert_eq!(before, after, "not rewritten when there is nothing to remove");
+    }
+
+    #[test]
+    fn pruning_a_history_that_does_not_exist_is_fine() {
+        let missing = std::env::temp_dir().join("localflow-no-such-history.jsonl");
+        assert!(prune_file(&missing, now()).is_ok());
     }
 
     #[test]

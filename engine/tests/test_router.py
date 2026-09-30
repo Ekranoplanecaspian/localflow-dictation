@@ -61,3 +61,19 @@ def test_config_default_language_applies_when_session_has_none(monkeypatch):
     audio = np.zeros(16000, np.float32)
     assert r.transcribe(audio) == "whisper"
     assert r.transcribe(audio, language="fr") == "parakeet"  # a session override still wins
+
+
+def test_whisper_is_unloaded_after_ten_minutes_unused(monkeypatch):
+    """It is loaded for the odd take in another language and used to stay loaded for good."""
+    import localflow.stt.router as R
+
+    now = [1000.0]
+    monkeypatch.setattr(R.time, "monotonic", lambda: now[0])
+    r = R.RoutedTranscriber.__new__(R.RoutedTranscriber)
+    r._lock = __import__("threading").Lock()
+    r._whisper, r._whisper_used = object(), now[0]
+    now[0] += 599
+    assert not r.drop_idle_whisper() and r._whisper is not None
+    now[0] += 2
+    assert r.drop_idle_whisper() and r._whisper is None
+    assert not r.drop_idle_whisper(), "nothing left to unload"

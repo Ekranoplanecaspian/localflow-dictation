@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from localflow import problems
 from localflow.cleanup import itn
 from localflow.cleanup.dictionary import Dictionary
 from localflow.cleanup.placeholders import expand as expand_placeholders
@@ -25,7 +26,19 @@ from localflow.llm.providers import Completion, LLMProvider
 
 log = logging.getLogger(__name__)
 
-_FILLERS = re.compile(r"\b(?:u+m+|u+h+|uhm|erm+|hmm+|mm+|ah+|er+)\b[,.]?\s*", re.IGNORECASE)
+_FILLERS = re.compile(r"\b(u+m+|u+h+|uhm|erm+|hmm+|mm+|ah+|er+)\b[,.]?\s*", re.IGNORECASE)
+
+
+def _drop_filler(m: re.Match) -> str:
+    """A hesitation goes; the same letters meaning something stay. A filler is never written in
+    capitals, so "take him to the ER" keeps its ER (and "UM", "MM" their meaning), and "mm"
+    straight after a number is millimetres: "a 5 mm screw" used to come out "a 5 screw"."""
+    word = m.group(1)
+    if len(word) > 1 and word.isupper():
+        return m.group(0)
+    if word.lower().startswith("mm") and m.string[: m.start()].rstrip()[-1:].isdigit():
+        return m.group(0)
+    return ""
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
 _MULTI_SPACE = re.compile(r"[ \t]{2,}")
 _SENTENCE_START = re.compile(r"(^|[.!?]\s+|\n\s*)([a-z])")
@@ -129,7 +142,7 @@ class CleanupPipeline:
     # layer 1: rules ------------------------------------------------------------------------
     def rules(self, text: str) -> str:
         if self.cfg.remove_fillers:
-            text = _FILLERS.sub("", text)
+            text = _FILLERS.sub(_drop_filler, text)
         if self.cfg.spoken_newlines:
             for pat, rep in _NEWLINES:
                 text = pat.sub(rep, text)
@@ -211,6 +224,15 @@ class CleanupPipeline:
         words = len(text.split())
         return max(48, min(self.cfg.llm_max_tokens, int(words * GUARD_MAX_RATIO * 2.0) + 16))
 
+    def warm(self) -> None:
+        """Evaluate the instructions once, so the first real clean-up finds them in the model's
+        prompt cache. On the processor that first evaluation is ~2.5 s of a 3 s clean-up; on a
+        freshly started server it would otherwise land on somebody's dictation."""
+        try:
+            self.prefill("Warming up.")
+        except Exception as e:
+            log.debug("warm-up failed: %s", e)
+
     def prefill(self, text: str, app: str | None = None, title: str | None = None) -> None:
         if self.provider and self.cfg.llm_cleanup and text.strip():
             self.provider.prefill(self.system_prompt(profile_for(app, title)), text)
@@ -240,8 +262,13 @@ class CleanupPipeline:
                 result.text = out
                 result.used_llm = True
         except Exception as e:
-            result.llm_rejected = f"error: {e}"
-            log.warning("LLM clean-up unavailable (%s); using rule output", e)
+            if problems.is_timeout(e):
+                # The time limit (llm_timeout_s) did its job: the take is typed with the rules.
+                result.llm_rejected = "timeout"
+                log.warning("[%s] the clean-up model took too long; using rule output", problems.CLEANUP_TIMEOUT)
+            else:
+                result.llm_rejected = f"error: {e}"
+                log.warning("LLM clean-up unavailable (%s); using rule output", e)
         return result
 
 

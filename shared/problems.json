@@ -1,0 +1,750 @@
+{
+  "$comment": "Every problem LocalFlow knows how to detect: its code, where it comes from, how it is detected, what the user is told and what fixes it. Compiled into the shell (app/src-tauri/src/problems.rs); the engine's tests check that every code the engine sends is here, and the shell's tests that every code it uses is. A new failure cannot ship without an entry. Sources: engine, shell, or both. Levels: failed (dictation cannot work), degraded (it works in a lesser way), info (one event, explained where it happened), handled (recovered by itself; logged only), internal (a bug or a misbehaving client; logged only). Placeholders in braces are filled in when the problem is reported: {detail} is the underlying error, kept for the log and the Status card. Messages follow one rule: what happened, why if known, what to do.",
+  "problems": [
+    {
+      "code": "engine-missing",
+      "part": "engine",
+      "level": "failed",
+      "source": "shell",
+      "detect": "Starting the engine fails because its program is not there (Windows reports the file as not found).",
+      "summary": "Missing",
+      "title": "LocalFlow's engine is missing",
+      "message": "The engine program isn't where LocalFlow expects it, so nothing can be transcribed. {detail} Reinstalling LocalFlow puts it back.",
+      "bar": "LocalFlow's engine is missing — see LocalFlow"
+    },
+    {
+      "code": "engine-blocked",
+      "part": "engine",
+      "level": "failed",
+      "source": "shell",
+      "detect": "Windows refuses to run the engine program: a policy (AppLocker or Software Restriction Policies, os error 1260), Smart App Control or WDAC (4551), or antivirus (225, 226) blocks it.",
+      "summary": "Blocked",
+      "title": "Windows is blocking LocalFlow's engine",
+      "message": "{detail} On a work computer, a company policy (AppLocker, Smart App Control) or antivirus may block programs in LocalFlow's folder: ask whoever manages the PC to allow LocalFlow. At home, check your antivirus's quarantine.",
+      "bar": "Windows is blocking LocalFlow — see LocalFlow"
+    },
+    {
+      "code": "engine-wont-start",
+      "part": "engine",
+      "level": "failed",
+      "source": "shell",
+      "detect": "The engine exits while starting, never prints its handshake, or refuses every connection, and the shell has stopped retrying.",
+      "summary": "Not running",
+      "title": "LocalFlow can't start its engine",
+      "message": "It stopped while starting: {detail} Restarting it often helps; if it keeps failing, the log in LocalFlow's folder says why.",
+      "action": { "id": "restart_engine", "label": "Restart engine" },
+      "bar": "LocalFlow's engine isn't running — see LocalFlow"
+    },
+    {
+      "code": "engine-restarting",
+      "part": "engine",
+      "level": "failed",
+      "source": "shell",
+      "detect": "The connection to the engine dropped, the engine exited, or it stopped answering for 30 s; the shell is starting it again, with backoff.",
+      "summary": "Restarting",
+      "title": "The engine stopped; LocalFlow is starting it again",
+      "message": "{detail} A take in progress is kept and typed once the engine is back.",
+      "bar": "Engine restarting — try again in a moment"
+    },
+    {
+      "code": "engine-safe-mode",
+      "part": "engine",
+      "level": "degraded",
+      "source": "shell",
+      "detect": "The engine crashed three times within two minutes, so it was restarted in safe mode.",
+      "summary": "Safe mode",
+      "title": "LocalFlow is in safe mode",
+      "message": "The engine stopped three times in two minutes, so it now runs on the processor with no AI clean-up. Your settings are unchanged.",
+      "action": { "id": "restart_engine", "label": "Leave safe mode" }
+    },
+    {
+      "code": "engine-lost-mid-take",
+      "part": "engine",
+      "level": "info",
+      "source": "shell",
+      "detect": "The engine went away while a take was being spoken; the take goes on recording and is played to the next engine.",
+      "title": "The engine restarted during a take",
+      "message": "Your words are kept and typed once the engine is back.",
+      "bar": "Engine restarting — your words are kept"
+    },
+    {
+      "code": "take-lost",
+      "part": "engine",
+      "level": "info",
+      "source": "shell",
+      "detect": "A take waited more than 90 s for a new engine and was given up.",
+      "title": "A dictation couldn't be finished",
+      "message": "The engine was gone for more than 90 seconds, so the words spoken then were not typed."
+    },
+    {
+      "code": "take-failed",
+      "part": "speech",
+      "level": "info",
+      "source": "engine",
+      "detect": "The final decode of a take raised an error in the engine.",
+      "title": "LocalFlow couldn't turn that take into text",
+      "message": "The speech model failed on it: {detail} The next take should work; if this keeps happening, restart the engine.",
+      "action": { "id": "restart_engine", "label": "Restart engine" }
+    },
+    {
+      "code": "take-refused",
+      "part": "speech",
+      "level": "info",
+      "source": "engine",
+      "detect": "The engine was asked to start a take before its speech model was ready (the shell normally refuses the press first).",
+      "title": "The speech model isn't ready yet",
+      "message": "{detail} Try again in a moment.",
+      "bar": "Warming up — try again in a moment"
+    },
+    {
+      "code": "speech-loading",
+      "part": "speech",
+      "level": "info",
+      "source": "shell",
+      "detect": "The hotkey was pressed while the speech model was still loading.",
+      "title": "The speech model is still loading",
+      "message": "Dictation starts working as soon as it has loaded, usually within a few seconds of LocalFlow starting.",
+      "bar": "Warming up — try again in a moment"
+    },
+    {
+      "code": "speech-download-failed",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "Loading the speech model needed a download, and it failed with a network error (no connection, a proxy, a name that would not resolve, a timeout).",
+      "summary": "Not downloaded",
+      "title": "The speech model couldn't be downloaded",
+      "message": "LocalFlow downloads {model} once, and the download failed: {detail} Check the internet connection; LocalFlow tries again by itself, and dictation starts as soon as it is here.",
+      "action": { "id": "restart_engine", "label": "Try now" },
+      "bar": "The speech model isn't downloaded yet — see LocalFlow"
+    },
+    {
+      "code": "speech-no-space",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "The speech model needs downloading and the drive holding the Hugging Face cache has less free space than it needs (checked before the download starts), or the download ran out of space.",
+      "summary": "No disk space",
+      "title": "Not enough disk space for the speech model",
+      "message": "{detail} Free some space; LocalFlow tries again by itself.",
+      "action": { "id": "storage", "label": "Storage settings" },
+      "bar": "Not enough disk space — see LocalFlow"
+    },
+    {
+      "code": "speech-clock-wrong",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "Downloading the speech model failed because the download site's certificate was not valid at this PC's time (expired or not yet valid): the clock is wrong.",
+      "summary": "Clock wrong",
+      "title": "This PC's clock is wrong",
+      "message": "{detail} Secure connections fail when the clock is wrong, so {model} can't be downloaded. Turn on “Set time automatically”; LocalFlow tries again by itself.",
+      "action": { "id": "date_time", "label": "Date & time settings" },
+      "bar": "This PC's clock is wrong — see LocalFlow"
+    },
+    {
+      "code": "speech-files-damaged",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "The speech model's files are missing or cannot be parsed (a file not found, a broken ONNX or protobuf file, a checksum mismatch).",
+      "summary": "Damaged",
+      "title": "The speech model's files are damaged",
+      "message": "{model} couldn't be read: {detail} Downloading it again fixes it. Antivirus software sometimes removes model files; if it does, allow LocalFlow's folder.",
+      "action": { "id": "redownload_models", "label": "Download again" },
+      "bar": "The speech model didn't load — see LocalFlow"
+    },
+    {
+      "code": "speech-out-of-memory",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "Loading the speech model ran out of memory, on the graphics card or the processor.",
+      "summary": "Out of memory",
+      "title": "There isn't enough memory for the speech model",
+      "message": "{model} needs more free memory than there is right now. Close some programs and try again, or choose a smaller speech model in Models.",
+      "action": { "id": "restart_engine", "label": "Try again" },
+      "bar": "The speech model didn't load — see LocalFlow"
+    },
+    {
+      "code": "speech-gpu-unavailable",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "Speech was set to run on the graphics card only, and the graphics card could not run it (CUDA unavailable).",
+      "summary": "Not loaded",
+      "title": "The graphics card couldn't run the speech model",
+      "message": "{detail} Set Models → Graphics card to Automatic so LocalFlow can use the processor instead, or update the NVIDIA driver.",
+      "action": { "id": "open_models", "label": "Open Models" },
+      "bar": "The speech model didn't load — see LocalFlow"
+    },
+    {
+      "code": "speech-load-failed",
+      "part": "speech",
+      "level": "failed",
+      "source": "engine",
+      "detect": "Loading the speech model failed for any other reason.",
+      "summary": "Not loaded",
+      "title": "The speech model couldn't load",
+      "message": "{detail}",
+      "help": "The speech model couldn't be started, for a reason the message on the Status card names. Restarting the engine often helps; if it keeps failing, Check LocalFlow looks at the model files, and Report a problem gathers what is needed to find the cause.",
+      "action": { "id": "restart_engine", "label": "Try again" },
+      "bar": "The speech model didn't load — see LocalFlow"
+    },
+    {
+      "code": "speech-switch-failed",
+      "part": "speech",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Switching to another speech model failed (its download or its load); the previous model stays in use.",
+      "summary": "{model}",
+      "title": "Couldn't switch to {to}",
+      "message": "{detail} Dictation goes on with {model}.",
+      "help_title": "Couldn't switch speech models",
+      "help": "The new model couldn't be downloaded or loaded, so LocalFlow went back to the one you had: dictation carries on. The message on the Status card says why; choosing the model again in Models tries again.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-download-failed",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Starting the bundled clean-up model needed a download (the model or llama-server), and it failed with a network error.",
+      "summary": "Not downloaded",
+      "title": "The clean-up model couldn't be downloaded",
+      "message": "{detail} Dictation goes on with the basic clean-up rules. Check the internet connection; LocalFlow tries again by itself.",
+      "action": { "id": "restart_engine", "label": "Try now" }
+    },
+    {
+      "code": "cleanup-blocked",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Windows refuses to run the clean-up server (llama-server): a policy (os error 1260), Smart App Control or WDAC (4551), or antivirus (225, 226).",
+      "summary": "Blocked",
+      "title": "Windows is blocking the clean-up server",
+      "message": "{detail} Dictation goes on with the basic clean-up rules. On a work computer, a company policy may block programs in LocalFlow's folder: ask whoever manages the PC to allow it. At home, check your antivirus's quarantine."
+    },
+    {
+      "code": "cleanup-no-space",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The clean-up model or server needs downloading and the drive has less free space than it needs, or the download ran out of space.",
+      "summary": "No disk space",
+      "title": "Not enough disk space for the clean-up model",
+      "message": "{detail} Dictation goes on with the basic clean-up rules. Free some space; LocalFlow tries again by itself.",
+      "action": { "id": "storage", "label": "Storage settings" }
+    },
+    {
+      "code": "cleanup-clock-wrong",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Downloading the clean-up model or server failed because the site's certificate was not valid at this PC's time: the clock is wrong.",
+      "summary": "Clock wrong",
+      "title": "This PC's clock is wrong",
+      "message": "{detail} Secure connections fail when the clock is wrong, so the clean-up model can't be downloaded; dictation goes on with the basic rules. Turn on “Set time automatically”; LocalFlow tries again by itself.",
+      "action": { "id": "date_time", "label": "Date & time settings" }
+    },
+    {
+      "code": "cleanup-server-missing",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "llama-server could not be found or unpacked, or this computer is not one it is provided for.",
+      "summary": "Unavailable",
+      "title": "The clean-up server is missing",
+      "message": "{detail} Dictation goes on with the basic clean-up rules; trying again downloads it afresh.",
+      "action": { "id": "restart_engine", "label": "Try again" }
+    },
+    {
+      "code": "cleanup-server-crashed",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "llama-server exited while starting, or never became healthy.",
+      "summary": "Unavailable",
+      "title": "The clean-up server stopped",
+      "message": "{detail} Dictation goes on with the basic clean-up rules.",
+      "action": { "id": "restart_engine", "label": "Try again" }
+    },
+    {
+      "code": "cleanup-out-of-memory",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Loading the clean-up model ran out of memory.",
+      "summary": "Out of memory",
+      "title": "There isn't enough memory for AI clean-up",
+      "message": "{model} needs more free memory than there is right now. Dictation goes on with the basic clean-up rules; a smaller clean-up model in Models may fit.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-low-memory",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Before starting the clean-up model, free RAM was below what it needs plus a margin for Windows and other apps, so it was not started. Tried again by itself.",
+      "summary": "Not enough memory",
+      "title": "AI clean-up is waiting for free memory",
+      "message": "{detail} Dictation goes on with the basic clean-up rules, and clean-up starts by itself once there is room. Closing some programs makes room sooner.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-cloud-key-rejected",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The cloud provider answered 401 or 403: the API key is wrong, expired or not allowed that model.",
+      "summary": "Key rejected",
+      "title": "Your cloud provider rejected the API key",
+      "message": "{detail} Check the key in Models. Dictation goes on with the basic clean-up rules.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-cloud-unreachable",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The cloud provider could not be reached: no connection, a name that would not resolve, a refused connection or a timeout.",
+      "summary": "Unreachable",
+      "title": "LocalFlow can't reach your cloud provider",
+      "message": "{detail} Check the address in Models and the internet connection. Dictation goes on with the basic clean-up rules.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-cloud-settings-missing",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "A cloud provider is chosen without the address or API key it needs.",
+      "summary": "Not set up",
+      "title": "The cloud provider isn't set up",
+      "message": "{detail} Fill it in under Models. Dictation goes on with the basic clean-up rules.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-load-failed",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Starting AI clean-up failed for any other reason.",
+      "summary": "Unavailable",
+      "title": "AI clean-up is unavailable",
+      "message": "{detail} Dictation goes on with the basic clean-up rules.",
+      "action": { "id": "restart_engine", "label": "Try again" }
+    },
+    {
+      "code": "cleanup-switch-failed",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "Switching to another clean-up model failed; the previous one stays in use.",
+      "summary": "{model}",
+      "title": "Couldn't switch to {to}",
+      "message": "{detail} Clean-up goes on with {model}.",
+      "help_title": "Couldn't switch clean-up models",
+      "help": "The new clean-up model couldn't be downloaded or started, so LocalFlow went back to the one you had. The message on the Status card says why; choosing the model again in Models tries again.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "cleanup-timeout",
+      "part": "cleanup",
+      "level": "handled",
+      "source": "engine",
+      "detect": "The clean-up model took longer than its time limit on a take; the take was typed with the basic rules.",
+      "title": "Typed without AI clean-up",
+      "message": "The clean-up model took too long, so this take was typed with the basic clean-up rules."
+    },
+    {
+      "code": "gpu-libs-download-failed",
+      "part": "gpu",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "An NVIDIA PC's first-run download of the CUDA libraries speech needs on the graphics card failed (no connection, no space, a checksum mismatch). Retried by itself when the cause goes away by itself.",
+      "summary": "Not ready",
+      "title": "The graphics card isn't ready for speech yet",
+      "message": "Speech needs about 1 GB of NVIDIA's libraries to run on the graphics card, and downloading them failed: {detail} Until they arrive speech runs on the processor, a little slower. LocalFlow tries again by itself."
+    },
+    {
+      "code": "gpu-unavailable",
+      "part": "gpu",
+      "level": "degraded",
+      "source": "shell",
+      "detect": "The placement wants speech on the graphics card, but the loaded model runs on the processor, and no move is under way.",
+      "summary": "Unavailable",
+      "title": "Speech couldn't use the graphics card",
+      "message": "It runs on the processor instead, which is slower. Updating the NVIDIA driver usually fixes this.",
+      "action": { "id": "restart_engine", "label": "Try again" }
+    },
+    {
+      "code": "mic-unavailable",
+      "part": "microphone",
+      "level": "failed",
+      "source": "shell",
+      "detect": "No input device can be opened: none is plugged in, Windows blocks access, or the device reports an error.",
+      "summary": "Unavailable",
+      "title": "The microphone isn't available",
+      "message": "{detail} If Windows is blocking it, allow microphone access for desktop apps.",
+      "action": { "id": "privacy_microphone", "label": "Microphone settings" },
+      "bar": "Microphone unavailable — see LocalFlow"
+    },
+    {
+      "code": "mic-fallback",
+      "part": "microphone",
+      "level": "degraded",
+      "source": "shell",
+      "detect": "The microphone chosen in the Hub is not connected, so the Windows default is used.",
+      "summary": "{device}",
+      "title": "Using {device} instead of your microphone",
+      "message": "{chosen} isn't connected, so LocalFlow listens with {device}.",
+      "help_title": "Your chosen microphone isn't connected",
+      "help": "The microphone chosen in Voice isn't plugged in or paired right now, so LocalFlow listens with Windows' default microphone instead. It switches back by itself when yours returns; or choose another in Voice.",
+      "action": { "id": "open_voice", "label": "Choose microphone" }
+    },
+    {
+      "code": "mic-lost-mid-take",
+      "part": "microphone",
+      "level": "info",
+      "source": "shell",
+      "detect": "The microphone stopped working while a take was being spoken; what was heard before is still transcribed.",
+      "title": "The microphone stopped during a take",
+      "message": "What you said before it stopped is kept.",
+      "bar": "Microphone lost — keeping what you said"
+    },
+    {
+      "code": "mic-glitch",
+      "part": "microphone",
+      "level": "handled",
+      "source": "shell",
+      "detect": "Windows reported a buffer underrun or overrun on the microphone stream (a data discontinuity): a few samples were lost and the stream goes on.",
+      "title": "The microphone skipped",
+      "message": "A few milliseconds of audio were lost; the microphone kept working."
+    },
+    {
+      "code": "mic-blocked",
+      "part": "microphone",
+      "level": "failed",
+      "source": "shell",
+      "detect": "Windows privacy settings deny microphone access to desktop apps (ConsentStore\\microphone, globally or for desktop apps); the stream then delivers only silence.",
+      "summary": "Blocked",
+      "title": "Windows is blocking the microphone",
+      "message": "Microphone access is turned off for desktop apps in Windows privacy settings, so LocalFlow hears only silence. Turn on “Let desktop apps access your microphone”.",
+      "action": {
+        "id": "privacy_microphone",
+        "label": "Microphone settings"
+      },
+      "bar": "Microphone blocked — see LocalFlow"
+    },
+    {
+      "code": "mic-silent",
+      "part": "microphone",
+      "level": "info",
+      "source": "shell",
+      "detect": "Check LocalFlow listened for a moment and the microphone sent nothing but digital silence (every sample zero).",
+      "title": "The microphone is sending silence",
+      "message": "{device} sent nothing but silence while LocalFlow listened. Is it muted, or its switch off? The Sound settings show its level.",
+      "action": {
+        "id": "sound",
+        "label": "Sound settings"
+      }
+    },
+    {
+      "code": "mic-in-use",
+      "part": "microphone",
+      "level": "failed",
+      "source": "shell",
+      "detect": "Opening the microphone fails because another app holds it in exclusive mode (AUDCLNT_E_DEVICE_IN_USE, cpal's DeviceBusy). An app that takes the device exclusively also stops LocalFlow's open stream.",
+      "summary": "In use",
+      "title": "Another app has the microphone to itself",
+      "message": "{device} is being used by another app in exclusive mode, so LocalFlow can't listen. It starts again by itself once that app lets go. To stop this happening, turn off “Allow applications to take exclusive control of this device” in the microphone's properties in Sound settings.",
+      "action": { "id": "sound", "label": "Sound settings" },
+      "bar": "Another app is using the microphone"
+    },
+    {
+      "code": "take-silent",
+      "part": "microphone",
+      "level": "info",
+      "source": "shell",
+      "detect": "A dictation came back without words, and its audio never rose above -60 dBFS: the microphone sent silence (muted, its switch off, or its volume at zero).",
+      "title": "LocalFlow heard nothing",
+      "message": "{device} sent only silence during the dictation. Is it muted, or its switch off? The Sound settings show its level.",
+      "action": { "id": "sound", "label": "Sound settings" },
+      "bar": "Heard nothing — is the microphone muted?"
+    },
+    {
+      "code": "mic-bluetooth",
+      "part": "microphone",
+      "level": "info",
+      "source": "shell",
+      "detect": "The microphone in use belongs to a Bluetooth device (its endpoint's parent is a BTH* device, e.g. BTHHFENUM for the hands-free profile).",
+      "title": "Listening through a Bluetooth headset",
+      "message": "Using a Bluetooth headset's microphone switches it to call quality: speech is heard less clearly, and music in the headphones drops to mono. A built-in or USB microphone usually recognises you better."
+    },
+    {
+      "code": "folder-not-writable",
+      "part": "storage",
+      "level": "degraded",
+      "source": "both",
+      "detect": "Writing a test file to LocalFlow's settings or models folder failed.",
+      "summary": "Can't write",
+      "title": "LocalFlow can't write to its folder",
+      "message": "{folder} can't be written to: {detail} Settings or downloads may not be saved. Check the folder's permissions, or whether antivirus software is blocking it."
+    },
+    {
+      "code": "disk-low",
+      "part": "storage",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The drive holding LocalFlow's models has less free space than a model download needs.",
+      "summary": "{free} free",
+      "title": "The disk is nearly full",
+      "message": "There is {free} free on {drive}; downloading or switching a model needs about {needed}. Dictation with the models already there is unaffected.",
+      "help": "The drive holding LocalFlow's models has less free space than a new model download needs. Dictation with the models already there is unaffected; free some space before switching models."
+    },
+    {
+      "code": "driver-too-old",
+      "part": "gpu",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The NVIDIA driver's version is older than CUDA 13 needs (580).",
+      "summary": "Driver too old",
+      "title": "The NVIDIA driver is too old",
+      "message": "Version {version} is installed, and LocalFlow's graphics-card code needs {needed} or newer, so everything runs on the processor. Update the driver with the NVIDIA App or from nvidia.com.",
+      "help": "LocalFlow's graphics-card code needs a recent NVIDIA driver (version 580 or newer). With an older one, everything runs on the processor, which works but is slower. Update the driver with the NVIDIA App or from nvidia.com."
+    },
+    {
+      "code": "cleanup-files-damaged",
+      "part": "cleanup",
+      "level": "degraded",
+      "source": "engine",
+      "detect": "The clean-up model's file no longer matches the SHA-256 its download recorded.",
+      "summary": "Damaged",
+      "title": "The clean-up model's file is damaged",
+      "message": "{model} doesn't match its download: {detail} Dictation goes on with the basic clean-up rules. Downloading it again fixes it.",
+      "action": {
+        "id": "redownload_models",
+        "label": "Download again"
+      }
+    },
+    {
+      "code": "download-hosts-unreachable",
+      "part": "network",
+      "level": "info",
+      "source": "engine",
+      "detect": "Check LocalFlow could not reach huggingface.co or github.com, where models and the clean-up server are downloaded from.",
+      "title": "LocalFlow can't reach its download sites",
+      "message": "{detail} Models come from huggingface.co and the clean-up server from github.com; check the internet connection or proxy. Dictation with what's already downloaded is unaffected."
+    },
+    {
+      "code": "text-kept-window-changed",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "When a take's text was ready, a different window was in front than the one it was spoken into.",
+      "title": "Kept your words: the window changed",
+      "message": "They weren't typed into a window you didn't speak into. Click where they should go and press Win + Alt + V.",
+      "bar": "Kept — the window changed. Win + Alt + V pastes it"
+    },
+    {
+      "code": "text-kept-no-window",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "When a take's text was ready, no window could take it (the desktop or the taskbar was in front).",
+      "title": "Kept your words: nowhere to type them",
+      "message": "Click where they should go and press Win + Alt + V.",
+      "bar": "Kept — nowhere to type it. Win + Alt + V pastes it"
+    },
+    {
+      "code": "text-copied-admin",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "The window the text is for belongs to an app running as administrator, and Windows blocks LocalFlow's keystrokes to it.",
+      "title": "This app runs as administrator",
+      "message": "Windows doesn't let LocalFlow type into apps running as administrator, so your words are on the clipboard instead. Press Ctrl + V to paste them.",
+      "bar": "This app runs as administrator — press Ctrl + V to paste"
+    },
+    {
+      "code": "paste-last-empty",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "Paste last dictation was asked for before anything was dictated.",
+      "title": "Nothing to paste yet",
+      "message": "Paste last dictation types the most recent dictation again; there hasn't been one since LocalFlow started.",
+      "bar": "Nothing to paste yet"
+    },
+    {
+      "code": "password-field",
+      "part": "hotkey",
+      "level": "handled",
+      "source": "shell",
+      "detect": "The focused control is a password field (UI Automation's IsPassword).",
+      "title": "Dictated into a password field",
+      "message": "Typed exactly as heard: no clean-up, not saved in history, not written to the log, not offered by Paste last dictation."
+    },
+    {
+      "code": "hotkey-hook-failed",
+      "part": "hotkey",
+      "level": "failed",
+      "source": "shell",
+      "detect": "Windows refused to install the keyboard hook.",
+      "summary": "Not listening",
+      "title": "The hotkey isn't working",
+      "message": "Windows didn't let LocalFlow watch the keyboard, so pressing the hotkey does nothing. Quitting and starting LocalFlow again usually fixes it."
+    },
+    {
+      "code": "hotkey-hook-reinstalled",
+      "part": "hotkey",
+      "level": "handled",
+      "source": "shell",
+      "detect": "The keyboard hook stopped receiving keys (Windows removes a slow hook without saying so), and was put back.",
+      "title": "The keyboard hook was put back",
+      "message": "Windows had stopped sending keys to LocalFlow; the hook was reinstalled."
+    },
+    {
+      "code": "dictation-off-in-app",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "The hotkey was pressed in an app where the user turned dictation off (Apps).",
+      "title": "Dictation is off in {app}",
+      "message": "You turned dictation off for {app} in Apps.",
+      "action": { "id": "open_apps", "label": "Open Apps" },
+      "bar": "Dictation is off in {app}"
+    },
+    {
+      "code": "command-no-selection",
+      "part": "cleanup",
+      "level": "info",
+      "source": "both",
+      "detect": "A command was spoken with no text selected (neither UI Automation nor a copy found any).",
+      "title": "Select some text first",
+      "message": "A command changes the text you've selected, and nothing was selected."
+    },
+    {
+      "code": "command-nothing-said",
+      "part": "cleanup",
+      "level": "info",
+      "source": "both",
+      "detect": "A command take ended with no instruction heard.",
+      "title": "No instruction was heard",
+      "message": "Hold the command hotkey and say what to do with the selected text."
+    },
+    {
+      "code": "command-selection-too-long",
+      "part": "cleanup",
+      "level": "info",
+      "source": "shell",
+      "detect": "The selected text is longer than a command accepts (100,000 characters).",
+      "title": "The selection is too long for a command",
+      "message": "Select a shorter piece of text and try again."
+    },
+    {
+      "code": "command-no-model",
+      "part": "cleanup",
+      "level": "info",
+      "source": "engine",
+      "detect": "A command was spoken while AI clean-up is off or unavailable.",
+      "title": "Commands need AI clean-up",
+      "message": "Turn on AI clean-up in Models to edit text by voice.",
+      "action": { "id": "open_models", "label": "Open Models" }
+    },
+    {
+      "code": "command-no-change",
+      "part": "cleanup",
+      "level": "info",
+      "source": "engine",
+      "detect": "The model returned the selection unchanged, or its answer was refused by the output guard.",
+      "title": "The text was left as it was",
+      "message": "The instruction didn't produce a change LocalFlow could trust, so your text is untouched."
+    },
+    {
+      "code": "command-truncated",
+      "part": "cleanup",
+      "level": "info",
+      "source": "engine",
+      "detect": "The model's answer was cut off by its length limit.",
+      "title": "The edit was too long to finish",
+      "message": "Half an edit would cut your text short, so it was left alone. Try a shorter selection."
+    },
+    {
+      "code": "command-failed",
+      "part": "cleanup",
+      "level": "info",
+      "source": "engine",
+      "detect": "The clean-up model raised an error on a command.",
+      "title": "The command didn't work",
+      "message": "{detail} Your text is untouched."
+    },
+    {
+      "code": "settings-newer",
+      "part": "storage",
+      "level": "degraded",
+      "source": "shell",
+      "detect": "A settings file (shell.json or config.json) carries a newer settings version than this LocalFlow knows: a newer version wrote it, and this is an older one (a downgrade).",
+      "summary": "Not saved",
+      "title": "These settings belong to a newer LocalFlow",
+      "message": "A newer version of LocalFlow saved them. This one uses what it understands, but saves no changes over them, so the newer version finds its settings as it left them. Changes made here last until LocalFlow closes."
+    },
+    {
+      "code": "settings-unreadable",
+      "part": "engine",
+      "level": "info",
+      "source": "shell",
+      "detect": "A settings file could not be parsed at start; it was set aside and the defaults used.",
+      "title": "LocalFlow's settings couldn't be read",
+      "message": "The settings file was damaged, so LocalFlow started with its defaults. The old file was kept as {detail}.",
+      "help": "LocalFlow's settings file was damaged (half-written, or edited by hand), so LocalFlow started with its defaults. The damaged file was kept beside the new one, with “broken” in its name, so nothing in it is lost."
+    },
+    {
+      "code": "setting-refused",
+      "part": "engine",
+      "level": "info",
+      "source": "engine",
+      "detect": "A setting sent from the Hub, or found in the engine's settings file, failed its checks and kept its previous value.",
+      "title": "A setting wasn't changed",
+      "message": "{detail}",
+      "help": "A change made in the Hub was refused because the value isn't one LocalFlow can use (the reason is shown when it happens). The setting keeps its previous value."
+    },
+    {
+      "code": "app-restarted",
+      "part": "engine",
+      "level": "info",
+      "source": "shell",
+      "detect": "LocalFlow closed unexpectedly and started itself again.",
+      "title": "LocalFlow restarted",
+      "message": "It closed unexpectedly and has started again. Dictation works as before."
+    },
+    {
+      "code": "bad-message",
+      "part": "engine",
+      "level": "internal",
+      "source": "engine",
+      "detect": "A client sent a message the engine could not read or whose fields had the wrong type or size.",
+      "title": "The engine refused a malformed message",
+      "message": "{detail}"
+    },
+    {
+      "code": "bad-audio",
+      "part": "engine",
+      "level": "internal",
+      "source": "engine",
+      "detect": "A client sent an audio frame that was too large or not 16-bit samples.",
+      "title": "The engine dropped a malformed audio frame",
+      "message": "{detail}"
+    },
+    {
+      "code": "unknown-message",
+      "part": "engine",
+      "level": "internal",
+      "source": "engine",
+      "detect": "A client sent a message type the engine does not know.",
+      "title": "The engine got a message it doesn't know",
+      "message": "{detail}"
+    }
+  ]
+}

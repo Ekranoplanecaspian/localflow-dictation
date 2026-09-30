@@ -48,8 +48,19 @@ def cuda_available() -> tuple[bool, str]:
     if "CUDAExecutionProvider" not in ort.get_available_providers():
         _cuda_probe = (False, "onnxruntime-gpu is not installed")
         return _cuda_probe
+    from localflow import cudalibs
+
+    if not cudalibs.available():
+        # the installer leaves them out; an NVIDIA PC downloads them on first run (B2)
+        _cuda_probe = (False, "the graphics card libraries are not downloaded yet")
+        return _cuda_probe
     try:
-        ort.preload_dlls()  # loads CUDA/cuDNN from the nvidia-* pip packages when present
+        folder = cudalibs.dll_dir()
+        if folder is not None:  # downloaded: load them from there
+            os.add_dll_directory(str(folder))
+            ort.preload_dlls(directory=str(folder))
+        else:  # the nvidia-* pip packages beside onnxruntime
+            ort.preload_dlls()
     except Exception as e:
         log.debug("preload_dlls: %s", e)
     try:
@@ -64,6 +75,12 @@ def cuda_available() -> tuple[bool, str]:
     except Exception as e:
         _cuda_probe = (False, f"CUDA provider failed: {str(e).splitlines()[0][:160]}")
     return _cuda_probe
+
+
+def reset_cuda_probe() -> None:
+    """Ask again next time: the CUDA libraries have just arrived (B2)."""
+    global _cuda_probe
+    _cuda_probe = None
 
 
 class ParakeetTranscriber:
@@ -92,6 +109,11 @@ class ParakeetTranscriber:
             providers = ["CPUExecutionProvider"]
         so = ort.SessionOptions()
         so.log_severity_level = 3
+        # onnxruntime uses one thread per physical core. LOCALFLOW_STT_THREADS sets another
+        # number: `bench` runs that stand in for a smaller PC (B4) pin the process to fewer
+        # cores, which onnxruntime does not notice by itself.
+        if os.environ.get("LOCALFLOW_STT_THREADS", "").isdigit():
+            so.intra_op_num_threads = int(os.environ["LOCALFLOW_STT_THREADS"])
 
         path = cfg.model_path
         quantization = "int8" if self.precision == "int8" else None

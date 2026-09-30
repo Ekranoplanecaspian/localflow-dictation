@@ -30,10 +30,10 @@ def build_transcriber(cfg: STTConfig) -> Transcriber:
         from localflow.stt.parakeet import ParakeetTranscriber
 
         return ParakeetTranscriber(cfg)
-    if cfg.backend == "whisper":  # Whisper turbo (onnxruntime) for everything
-        from localflow.stt.whisper_onnx import WhisperOnnxTranscriber
+    if cfg.backend == "whisper":  # a Whisper (onnxruntime) for everything; turbo unless one is named
+        from localflow.stt.whisper_onnx import DEFAULT_MODEL, WhisperOnnxTranscriber
 
-        return WhisperOnnxTranscriber(cfg)
+        return WhisperOnnxTranscriber(cfg, model=cfg.model if "whisper" in cfg.model else DEFAULT_MODEL)
     if cfg.backend == "whisper-ct2":  # faster-whisper / CTranslate2 (optional extra)
         from localflow.stt.whisper import WhisperTranscriber
 

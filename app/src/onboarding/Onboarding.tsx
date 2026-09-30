@@ -145,7 +145,7 @@ export default function Onboarding({ data, onDone }: Props) {
                             <ul className="points">
                                 <li>
                                     <b>Nothing leaves this machine.</b> Your voice and your text are
-                                    transcribed and tidied by models running on your own GPU.
+                                    transcribed and tidied by models running on your own PC.
                                 </li>
                                 <li>
                                     <b>It cleans up as it goes.</b> Filler words, false starts and
@@ -167,7 +167,7 @@ export default function Onboarding({ data, onDone }: Props) {
                                 <option value="">System default</option>
                                 {(data?.microphones ?? []).map((m) => (
                                     <option key={m} value={m}>
-                                        {m}
+                                        {data?.bluetooth_microphones?.includes(m) ? `${m} — Bluetooth` : m}
                                     </option>
                                 ))}
                             </select>

@@ -186,7 +186,61 @@ def test_the_measured_echo_is_undone():
         strip_echo("I spoke to", "I spoke to Priya about the parakeet rollout.")
         == "Priya about the parakeet rollout."
     )
-    assert join("I spoke to", "I spoke to Priya about the rollout.") == " Priya about the rollout."
+    assert join("I spoke to", "I spoke to Priya about the rollout.", from_model=True) == " Priya about the rollout."
+
+
+def test_words_the_speaker_repeated_are_kept_when_no_model_wrote_them():
+    """Only the model echoes. Without it, repeating what is already at the caret is what the
+    user said, and it used to be cut: "Thanks so much for the help" came out "for the help"."""
+    assert join("Thanks so much.", "Thanks so much for the help.") == " Thanks so much for the help."
+    assert join("we should ship it", "We should ship it") == " we should ship it"
+
+
+def test_the_engine_only_strips_an_echo_from_model_output(monkeypatch):
+    """The whole path: the same take, cleaned with rules only and then by a model that echoes."""
+    import time
+
+    import numpy as np
+
+    import localflow.service.engine as eng
+    from localflow.cleanup.pipeline import CleanupPipeline
+    from localflow.config import Config, PostProcessConfig
+    from tests.test_cleanup import FakeProvider
+    from tests.test_service import FakeSTT, blocks, fixture_audio
+
+    class SaysThanks(FakeSTT):
+        def transcribe(self, audio, language=None):
+            return "Thanks so much for the help."
+
+    monkeypatch.setattr(eng, "build_transcriber", lambda cfg: SaysThanks())
+    cfg = Config()
+    cfg.postprocess.llm_cleanup = False
+    engine = eng.Engine(cfg)
+    engine.load()
+    deadline = time.monotonic() + 30
+    while engine.state == "loading" and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    def final_text(pipeline: CleanupPipeline) -> str:
+        engine.cleanup = pipeline
+        events: list[dict] = []
+        s = engine.start_session("s", {"before_caret": "Thanks so much."}, events.append)
+        for b in blocks(fixture_audio()):
+            s.feed((np.clip(b * 32767, -32768, 32767)).astype("<i2").tobytes())
+        s.end()
+        deadline = time.monotonic() + 30
+        while not s.done and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return next(e["text"] for e in events if e["type"] == "final")
+
+    try:
+        rules_only = final_text(CleanupPipeline(PostProcessConfig(llm_cleanup=False)))
+        assert rules_only == " Thanks so much for the help."
+        echoing = FakeProvider("Thanks so much. Thanks so much for the help.")
+        with_model = final_text(CleanupPipeline(PostProcessConfig(llm_cleanup=True, llm_min_words=1), echoing))
+        assert with_model == " Thanks so much for the help."
+    finally:
+        engine.shutdown()
 
 
 def test_an_echo_is_matched_ignoring_case_and_punctuation():

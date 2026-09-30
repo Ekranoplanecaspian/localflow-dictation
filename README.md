@@ -2,8 +2,8 @@
 
 Local, private push-to-talk dictation for Windows. Hold **Ctrl+Win**, talk, let go, and the
 text appears wherever your caret is. No subscription, no cloud: the speech model
-(NVIDIA Parakeet TDT 0.6B v3) runs on your machine and the optional clean-up LLM runs on
-your GPU.
+(NVIDIA Parakeet TDT 0.6B v3) and the clean-up model (Qwen3 4B) both run on your PC - on its
+graphics card when it has a suitable one, otherwise on the processor.
 
 > **Not open source.** Copyright (c) 2026 Arnab Arya, all rights reserved. The source is here
 > to read; it is not licensed for reuse. The installer on the Releases page may be downloaded
@@ -109,6 +109,34 @@ Settings live in `%APPDATA%\LocalFlow\config.json`; logs in `%APPDATA%\LocalFlow
 | `postprocess.dictionary` | exact replacements: `{"arnub": "Arnab"}` |
 | `postprocess.snippets` | `{"my email": "you@example.com"}` |
 | `inject.method` | `auto` / `type` / `paste` |
+| `compute.mode` | `adaptive` (default), `gpu` (always the graphics card), `cpu` (never) |
+| `compute.temp_limit_c` | adaptive: clean-up moves to the processor at this temperature, speech 6 °C above it (default 80) |
+| `compute.auto_speech`, `compute.auto_cleanup` | `true` (default): LocalFlow picks the model; `false`: the one set in `stt` / `postprocess` |
+| `compute.idle_release_min` | adaptive: free the graphics card after this many minutes unused; `0` = never (default 10) |
+
+## Models and where they run
+
+The Hub's **Models** page picks the speech model (Parakeet v3, Parakeet v2, Parakeet v3 Compact,
+Whisper Large v3 Turbo) and the clean-up model (Qwen3 4B, Phi-4 mini, Gemma 4 E2B). A model
+downloads the first time it is chosen, and the current one keeps working until the new one has
+loaded.
+
+LocalFlow also decides where each model runs. In the default **Automatic** mode it watches the
+graphics card's temperature and load: as it warms up it first stops keeping it busy between
+words, then moves clean-up to the processor (about 0.4 s slower per dictation), then speech;
+another app using the GPU moves clean-up off it too; and after ten idle minutes both leave the
+GPU, freeing its memory, until the next dictation takes it back. Models move without
+interrupting dictation. Parakeet Compact always runs on the processor, where it is faster. The
+policy is `engine/src/localflow/placement.py`.
+
+Which model runs is **Automatic** by default too, and it puts quality first: the most accurate
+model that is quick enough on the device it is running on (speech within 0.25 s per second of
+audio, clean-up within 1.5 s). On a fast machine that means Parakeet v3 and Qwen3 4B everywhere;
+a slower processor gets Parakeet Compact or Phi-4 mini when work lands on it. Every dictation's
+timings are recorded (`perf.json` beside the settings), so the choice follows what this machine
+actually does rather than an estimate. Automatic only switches between models already
+downloaded (apart from Compact, 0.7 GB). Choosing a model in the Hub pins it; choosing
+Automatic again hands it back. The policy is `engine/src/localflow/modelchoice.py`.
 
 ## Benchmark
 
@@ -155,9 +183,13 @@ cd engine; ..\.venv\Scripts\python -m PyInstaller localflow-engine.spec --noconf
 cd ..\app; npm run tauri build
 ```
 
-The first step produces `engine/dist/localflow-engine/` - about 1.8 GB, mostly the CUDA
-libraries onnxruntime loads by name. The second produces an installer under
-`app/src-tauri/target/release/bundle/`.
+The first step produces `engine/dist/localflow-engine/` - about 300 MB, most of it
+onnxruntime. The second produces an installer under `app/src-tauri/target/release/bundle/`.
+
+NVIDIA's CUDA libraries (cuDNN, cuBLAS, cuFFT: 1.5 GB unpacked) are left out on purpose. A PC
+with an NVIDIA card downloads them on first run (about 1 GB, from PyPI, checked against pinned
+checksums) while speech runs on the processor, and moves speech to the graphics card once they
+are there; `localflow cuda --install` fetches them by hand. A PC without one never needs them.
 
 The installer is per-user: it needs no administrator prompt, installs under `%LOCALAPPDATA%`,
 and the start-at-sign-in entry the app writes lives in `HKCU` beside it. Uninstalling removes
@@ -168,3 +200,18 @@ reason to be there.
 The speech and clean-up models are **not** in the installer. They download on first run to
 `%LOCALAPPDATA%\LocalFlow`, resumably and with checksums, which keeps the installer to the
 program itself rather than roughly five gigabytes of weights.
+
+## Working on LocalFlow
+
+The copy you use every day is the **installed** one, in `%LOCALAPPDATA%\LocalFlow`, started from
+the Start menu. Builds from this repository are separate and never replace it.
+
+| | |
+|---|---|
+| `main` | v0.2, under development - status in [docs/ROADMAP.md](docs/ROADMAP.md#version-02-in-development-on-main) |
+| `release/0.1` | fixes for the shipped v0.1, branched from the `v0.1.0` tag |
+
+Only one copy of LocalFlow can run at a time - the second one hands over to the first and
+exits - so quit the installed one from the tray before starting a development build. Both share
+your settings, history and downloaded models. A development build will not take start-at-sign-in
+away from the installed copy: it only repairs a sign-in entry that is actually broken.

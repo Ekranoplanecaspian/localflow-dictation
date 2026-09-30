@@ -15,6 +15,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::guard::LockExt;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindowBuilder};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
@@ -119,10 +120,25 @@ fn place(app: &AppHandle) {
     }
 }
 
+/// A notice: shown for `hold` (the default when None), then taken away.
+pub fn show_notice(app: &AppHandle, hold: Option<Duration>) {
+    *NOTICE_HOLD.locked() = hold.unwrap_or(NOTICE);
+    on_phase(app, "notice");
+}
+
+/// How long the notice being shown stays.
+static NOTICE_HOLD: std::sync::Mutex<Duration> = std::sync::Mutex::new(NOTICE);
+
 /// Show or hide the bar as the dictation phase changes.
 pub fn on_phase(app: &AppHandle, phase: &str) {
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let Some(window) = app.get_webview_window(LABEL) else { return };
+    // "Show the flow bar" off: no bar at all. The switch was saved and never read, so turning it
+    // off changed nothing. Read on every phase change, so it applies from the next take.
+    if !crate::settings::load().flow_bar {
+        let _ = window.hide();
+        return;
+    }
     match phase {
         "recording" => {
             // Re-place on every take: the user may have moved to another monitor since the last.
@@ -133,15 +149,16 @@ pub fn on_phase(app: &AppHandle, phase: &str) {
             let _ = window.set_always_on_top(true);
         }
         // Not a take, just a message: show the bar, hold it long enough to read, take it away.
-        "warming" => {
+        "notice" => {
             place(app);
             let _ = window.show();
             let _ = window.set_always_on_top(true);
             let app = app.clone();
             std::thread::Builder::new()
-                .name("flowbar-warming".into())
+                .name("flowbar-notice".into())
                 .spawn(move || {
-                    std::thread::sleep(NOTICE);
+                    let hold = *NOTICE_HOLD.locked();
+                    std::thread::sleep(hold);
                     if GENERATION.load(Ordering::SeqCst) != generation {
                         return;
                     }
