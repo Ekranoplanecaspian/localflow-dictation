@@ -20,6 +20,9 @@ shell -> engine
                     llm?: { model: <bundled model key> },
                     compute?: { mode, temp_limit_c, idle_release_min, auto_speech, auto_cleanup } }
                   (choosing a stt/llm model pins it: auto_speech/auto_cleanup turn off)
+  models.download { kind: speech|cleanup, key }   fetch a model without switching to it
+  models.cancel   { id }                          stop a download (status.downloads[].id)
+  models.remove   { kind, key }                   delete a downloaded model not in use
   shutdown        {}
 
 engine -> shell
@@ -31,7 +34,15 @@ engine -> shell
                            switch: { to, state: downloading|loading|error, progress, error } | null,
                            download: { label, progress, size_gb } | null },   # a first run's download
                     llm: { state, error, enabled, provider, model, label,
-                           choices: [...as stt], switch: {...as stt} | null },
+                           choices: [...as stt], switch: {...as stt} | null,
+                           download: {...as stt} | null },              # what loading waits for
+                    (choices also carry fit: { rating: good|slow|too-big, why }, rated_on,
+                     disk_gb, removable, download: <job id> | null)
+                    downloads: [{ id, kind: speech|cleanup|runtime|gpu-libs, key, label,
+                                  state: queued|downloading|done|error|cancelled, reason, cancellable,
+                                  done, total, progress, speed_bps, eta_s, error, ended_s_ago }],
+                    recommended: [{ kind, key, label, why, size_gb, installed,
+                                    action: use|download|enable }],   # models that would help here
                     compute: { mode, temp_limit_c, idle_release_min, level, reason, speech, cleanup,
                                keep_warm, moving, gpu: { name, temp_c, util_pct, mem_used_mb,
                                mem_total_mb, slowdown_c } | null, recent: [{ at, what, to, model,
@@ -85,6 +96,12 @@ SELFCHECK_RUN = "selfcheck.run"  # { id, full } -> selfcheck.result { id, checks
 SELFCHECK_RESULT = "selfcheck.result"
 SELFCHECK_REPAIR = "selfcheck.repair"  # { id } -> selfcheck.repaired { id, removed: [path] }
 SELFCHECK_REPAIRED = "selfcheck.repaired"
+# The model library (Hub > Models, M1): download a model without switching to it, stop a
+# download, take a model off the PC. Each is answered with a status; a refusal with an error.
+MODELS_DOWNLOAD = "models.download"  # { kind: speech|cleanup, key }
+MODELS_CANCEL = "models.cancel"  # { id }: a download's id from status.downloads
+MODELS_REMOVE = "models.remove"  # { kind, key }
+MODEL_KINDS = ("speech", "cleanup")
 
 # close codes
 CLOSE_UNAUTHORIZED = 4001
@@ -163,6 +180,19 @@ def checked(msg: dict[str, Any]) -> dict[str, Any]:
         return {**msg,
                 "selection": _optional_str(msg, "selection", MAX_SELECTION_CHARS) or "",
                 "instruction": _optional_str(msg, "instruction", MAX_INSTRUCTION_CHARS) or ""}
+    if t in (MODELS_DOWNLOAD, MODELS_REMOVE):
+        kind = _optional_str(msg, "kind", MAX_ID_CHARS)
+        if kind not in MODEL_KINDS:
+            raise ValueError(f"'kind' must be one of {', '.join(MODEL_KINDS)}")
+        key = _optional_str(msg, "key", MAX_ID_CHARS)
+        if not key:
+            raise ValueError("'key' is required")
+        return {**msg, "kind": kind, "key": key}
+    if t == MODELS_CANCEL:
+        job = _optional_str(msg, "id", MAX_ID_CHARS)
+        if not job:
+            raise ValueError("'id' is required")
+        return {**msg, "id": job}
     return msg
 
 

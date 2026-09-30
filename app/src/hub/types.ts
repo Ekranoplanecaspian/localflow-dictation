@@ -2,7 +2,8 @@ export type Phase = "idle" | "recording" | "finishing";
 export type Link = "starting" | "connecting" | "ready" | "reconnecting" | "failed" | "stopped";
 
 export type ModelState = {
-    state: "loading" | "ready" | "error" | "off";
+    /** "asleep": clean-up unloaded while LocalFlow is idle; the next dictation wakes it. */
+    state: "loading" | "ready" | "error" | "off" | "asleep";
     error?: string | null;
     backend?: string;
     model?: string;
@@ -15,7 +16,18 @@ export type ModelState = {
     label?: string;
     choices?: ModelChoice[];
     switch?: ModelSwitch | null;
+    /** What this part waits for before it works at all: its model's (or runtime's) download. */
+    download?: {
+        id: string;
+        label: string;
+        progress: number;
+        size_gb: number;
+        state: "queued" | "downloading";
+    } | null;
 };
+
+/** How a model suits this PC, on the device it would run on (the engine's model choice). */
+export type Fit = { rating: "good" | "slow" | "too-big"; why: string };
 
 /** One model the engine can move to, as its catalogue describes it. */
 export type ModelChoice = {
@@ -31,6 +43,44 @@ export type ModelChoice = {
     /** 1 to 5, measured on the benchmark sets rather than guessed. */
     speed?: number;
     accuracy?: number;
+    /** The library (M1): how it suits this PC, what it takes on disk, and whether it can go. */
+    fit?: Fit | null;
+    rated_on?: Device | null;
+    disk_gb?: number;
+    removable?: boolean;
+    /** The id of its download, while one is queued or running. */
+    download?: string | null;
+};
+
+/** A model that would make dictation better on this PC and is not in use (M4). */
+export type Recommendation = {
+    kind: "speech" | "cleanup";
+    key: string;
+    label: string;
+    why: string;
+    size_gb: number;
+    installed: boolean;
+    /** use: switch to it (downloading first); download: fetch it for Automatic; enable: turn auto-edits on */
+    action: "use" | "download" | "enable";
+};
+
+/** One download in the engine's queue (M1). */
+export type Download = {
+    id: string;
+    kind: "speech" | "cleanup" | "runtime" | "gpu-libs";
+    key: string;
+    label: string;
+    state: "queued" | "downloading" | "done" | "error" | "cancelled";
+    reason: "first-run" | "switch" | "automatic" | "library";
+    cancellable: boolean;
+    done: number;
+    total: number;
+    progress: number;
+    speed_bps: number;
+    eta_s: number | null;
+    error: string | null;
+    /** Seconds since it finished; null while it is queued or running. */
+    ended_s_ago?: number | null;
 };
 
 export type ModelSwitch = {
@@ -212,6 +262,10 @@ export type HubData = {
     engine: {
         stt?: ModelState;
         llm?: ModelState;
+        /** Every download: running and queued first, then the last few finished. */
+        downloads?: Download[];
+        /** Models that would make dictation better on this PC. */
+        recommended?: Recommendation[];
         compute?: ComputeStatus;
         /** Where downloads come from: the mirror ("" for huggingface.co) and Windows' proxy. */
         network?: { hf_endpoint: string; proxy: string | null };

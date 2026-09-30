@@ -269,6 +269,41 @@ def _choose(kind: str, order: tuple[str, ...], budget: float, device: str, hw: H
                        f"({speed}, {'measured' if seen else 'estimated'})")
 
 
+# how a model suits this PC -------------------------------------------------------------------------
+# What Windows and the apps being dictated into keep for themselves, for "too big for this PC".
+# Stricter than the start-up check (HEADROOM_GB, against free memory right now): this rating is
+# about the PC, not the moment, and a model that leaves Windows 2 GB makes everything else crawl.
+KEEP_FOR_WINDOWS_GB = 4.0
+
+
+@dataclass(frozen=True)
+class Fit:
+    rating: str  # good | slow | too-big
+    why: str
+
+
+def fit(kind: str, key: str, device: str, hw: Hardware, perf: PerfLog, *,
+        ram_gb: float, vram_mb: int | None = None) -> Fit:
+    """How model `key` would suit this PC on `device` (where it would run): too big for its
+    memory, quick enough (the same budget Automatic uses), or working but slowly. `ram_gb` and
+    `vram_mb` are what the model takes there."""
+    unit = "speech" if kind == "speech" else "clean-up"
+    where = device_words(device, hw)
+    if device == "cuda" and vram_mb and hw.vram_mb and vram_mb > hw.vram_mb * 0.9:
+        return Fit("too-big", f"needs about {vram_mb / 1024:.1f} GB on the graphics card, which has "
+                              f"{hw.vram_mb / 1024:.0f} GB")
+    if hw.ram_gb and ram_gb + KEEP_FOR_WINDOWS_GB > hw.ram_gb:
+        return Fit("too-big", f"needs about {ram_gb:.1f} GB of memory, and this PC has {hw.ram_gb:.0f} GB")
+    ms, seen = perf.estimate(kind, key, device, hw)
+    if ms is None:
+        return Fit("good", f"runs on {where}")
+    how = "measured" if seen else "estimated"
+    budget = SPEECH_BUDGET_MS_PER_S if kind == "speech" else CLEANUP_BUDGET_MS
+    if ms <= budget:
+        return Fit("good", f"quick on {where} ({_speed(ms, unit)}, {how})")
+    return Fit("slow", f"{_speed(ms, unit)} on {where}, {how}")
+
+
 def _where(device: str) -> str:
     return {"cuda": "graphics card", "vulkan": "built-in graphics"}.get(device, "processor")
 

@@ -34,13 +34,16 @@ from typing import Any
 
 import numpy as np
 
-from localflow import __version__, cudalibs, hwinfo, modelchoice, problems
+from localflow import __version__, cudalibs, fetch, hwinfo, library, modelchoice, problems
 from localflow.cleanup.command import CommandResult, CommandRunner
 from localflow.cleanup.joining import join
 from localflow.cleanup.pipeline import CleanupPipeline
 from localflow.config import ComputeConfig, Config, PostProcessConfig, STTConfig, for_this_pc, in_safe_mode
+from localflow.llm import manifest as llm_manifest
+from localflow.placement import SPEECH_VRAM_MB, cleanup_vram_mb
 from localflow.service import protocol as P
 from localflow.service.compute import ComputeController
+from localflow.service.downloads import Downloads
 from localflow.service.vad import SAMPLE_RATE, Segment, Segmenter, SileroVad
 from localflow.stt import Transcriber, build_transcriber, catalogue, remote
 
@@ -396,7 +399,10 @@ class Engine:
         self.last_full_check: list = []  # the last full check's results, for "Download again"
         self.llm_server = None
         self.gpu_failures = 0  # speech on the graphics card failed and moved to the processor
-        self.first_download: dict[str, Any] | None = None  # the speech model's first download, for the status
+        # Every download - models, the clean-up runtime, the CUDA libraries - one at a time (M1).
+        self.downloads = Downloads(self._broadcast_status)
+        # (kind, key, installed) -> (when, (device, fit, disk bytes)): see _rating
+        self._ratings: dict[tuple[str, str, bool], tuple[float, tuple[str | None, Any, int]]] = {}
         # The CUDA libraries' first download on an NVIDIA PC (B2): {"state": downloading|ready|error,
         # "done", "total"} or {"state": "error", "error"}; None when there is nothing to fetch.
         self.cuda_libs: dict[str, Any] | None = None
@@ -460,9 +466,6 @@ class Engine:
             t0 = time.perf_counter()
             self.vad = SileroVad()
             self._fetch_speech()
-            # Done downloading: "ready" below must not go out beside a download at 100 %, which
-            # stayed in the status until the warm-up decode had finished too.
-            self.first_download = None
             self.stt = self._build_stt(self._speech_cfg())
             # Ready before the warm-up decode, not after: this job still holds the speech
             # worker, so a take started meanwhile has its first decode wait for the warm-up,
@@ -479,8 +482,6 @@ class Engine:
             log.exception("engine failed to load (%s)", self.error_code)
             if self.error_code in problems.RETRY_BY_ITSELF:
                 self._retry(lambda: self._pool.submit(self._load_speech), "speech")
-        finally:
-            self.first_download = None
         self._broadcast_status()
 
     def _retry(self, again: Callable[[], Any], what: str) -> None:
@@ -500,29 +501,236 @@ class Engine:
 
     def _fetch_speech(self) -> None:
         """A first run: download the speech model here, with a check for room first and progress
-        in the status, rather than inside the model loader where neither is possible."""
-        from localflow import net
-
+        in the status, rather than inside the model loader where neither is possible. It cannot
+        be cancelled: without it there is no dictation at all."""
         entry = catalogue.current(self.cfg.stt)
         device = self.compute.placement.speech
         if entry is None or catalogue.is_installed(entry, device):
             return
-        net.wait_for_proxy()
-        size = int(entry.size_gb(device) * 1e9)
-        net.ensure_space(net.hf_cache_dir(), size, entry.label)
-        log.info("downloading %s (%.1f GB) from %s", entry.label, size / 1e9, net.download_host())
-        self.first_download = {"label": entry.label, "progress": 0.0, "size_gb": round(size / 1e9, 1)}
+        self._download_model("speech", entry.key, device, "first-run", cancellable=False)
+
+    # downloads (M1) -------------------------------------------------------------------------------------
+    def _download_model(self, kind: str, key: str, device: str, reason: str, *, cancellable: bool = True,
+                        progress: Callable[[int, int], None] | None = None, wait: bool = True) -> Any:
+        """Queue model `key` (speech | cleanup) and, with `wait`, return once it is on disk."""
+        if kind == "speech":
+            model = catalogue.get(key)
+            label, size = model.label, int(model.size_gb(device) * 1e9)
+        else:
+            entry = llm_manifest.CLEANUP_MODELS[key]
+            label, size = entry.label or key, int(entry.approx_gb * 1e9)
+
+        def run(report: Callable[[int, int], None], stop: threading.Event) -> None:
+            fetch.run(kind, key, device, report, stop)
+
+        ask = self.downloads.fetch if wait else self.downloads.request
+        return ask(kind, key, label, size, run, reason, cancellable=cancellable, progress=progress)
+
+    def _fetch_cleanup_runtime(self, where: str) -> None:
+        """llama.cpp for `where` (the LlamaServer device), through the queue, if it is not here.
+        LocalFlow's own part: shown, not cancellable."""
+        from localflow.llm.server import ensure_binaries
+
+        kind = {"auto": "cuda", "cuda": "cuda", "vulkan": "vulkan"}.get(where, "cpu")
+        if llm_manifest.llama_server_exe(kind).exists() and (llm_manifest.llama_dir(kind) / ".ok").exists():
+            return
+        if not llm_manifest.is_windows_x64():
+            return  # ensure_binaries says why, where the server starts
+        size = sum(a.size or 0 for a in llm_manifest.LLAMA_ASSETS[kind])
+
+        def run(report: Callable[[int, int], None], stop: threading.Event) -> None:
+            def progress(_name: str, done: int, total: int | None) -> None:
+                if stop.is_set():
+                    raise fetch.Cancelled()
+                if total:
+                    report(done, total)
+
+            ensure_binaries(kind, progress)
+
+        self.downloads.fetch("runtime", kind, "Clean-up runtime (llama.cpp)", size, run, "automatic",
+                             cancellable=False)
+
+    def download_model(self, kind: str, key: str) -> None:
+        """The Hub's Download: fetch a model to have it ready, without switching to it."""
+        if kind == "speech":
+            model = catalogue.get(key)
+            device = self._rated_device("speech", key)
+            if catalogue.is_installed(model, device):
+                return
+        elif kind == "cleanup":
+            if key not in llm_manifest.CLEANUP_MODELS:
+                raise ValueError(f"unknown clean-up model {key!r}")
+            device = ""
+            if llm_manifest.gguf_path(key).exists():
+                return
+        else:
+            raise ValueError(f"unknown kind of model {kind!r}")
+        self._download_model(kind, key, device, "library", wait=False)
+
+    def cancel_download(self, job_id: str) -> bool:
+        return self.downloads.cancel(job_id)
+
+    def remove_model(self, kind: str, key: str) -> int:
+        """Delete a downloaded model. Never the one in use, nor one downloading. Returns the bytes
+        freed."""
+        if self.downloads.active(kind, key) is not None:
+            raise ValueError("it is downloading; cancel the download first")
+        if kind == "speech":
+            model = catalogue.get(key)
+            if self._speech_in_use(model):
+                raise ValueError(f"{model.label} is the speech model in use; choose another one first")
+            freed = library.remove_speech(model)
+        elif kind == "cleanup":
+            if key not in llm_manifest.CLEANUP_MODELS:
+                raise ValueError(f"unknown clean-up model {key!r}")
+            if self._cleanup_in_use(key):
+                raise ValueError(f"{llm_manifest.CLEANUP_MODELS[key].label or key} is the clean-up model in use; "
+                                 f"choose another one first")
+            freed = library.remove_cleanup(key)
+        else:
+            raise ValueError(f"unknown kind of model {kind!r}")
+        self._ratings.clear()  # its disk is freed now
         self._broadcast_status()
-        last = [0.0]
+        return freed
 
-        def progress(done: int, total: int) -> None:
-            now = time.monotonic()
-            if total and (done >= total or now - last[0] > 0.5):
-                last[0] = now
-                self.first_download = {**(self.first_download or {}), "progress": round(done / total, 3)}
-                self._broadcast_status()
+    def _speech_in_use(self, model: catalogue.SpeechModel) -> bool:
+        current = catalogue.current(self.cfg.stt)
+        switching = (self.speech_switch or {}).get("to")
+        # Whisper loaded on the side for another language keeps working from memory; the next
+        # time a language needs it, it is downloaded again.
+        return (current is not None and current.key == model.key) or switching == model.key
 
-        catalogue.download(entry, device, progress=progress)
+    def _cleanup_in_use(self, key: str) -> bool:
+        pp = self.cfg.postprocess
+        switching = (self.cleanup_switch or {}).get("to")
+        return (pp.llm_provider == "bundled" and pp.llm_model == key and pp.llm_cleanup) or switching == key
+
+    def _rated_device(self, kind: str, key: str) -> str:
+        """Where a model would run on this PC at its best - not where heat has put things right
+        now - for the library's rating and for which files to download."""
+        hw = self.compute.hardware
+        cpu_only = self.cfg.compute.mode == "cpu" or self.cfg.stt.device == "cpu"
+        if kind == "speech":
+            speed = catalogue.get(key).speed or {}
+            prefers_cpu = speed.get("cpu", 0) > speed.get("cuda", 0)
+            return "cpu" if cpu_only or prefers_cpu or hw is None or not hw.nvidia else "cuda"
+        if not cpu_only and hw is not None and hw.nvidia:
+            return "cuda"
+        if not cpu_only and hw is not None and hw.other_gpu is not None and not self.compute.no_vulkan:
+            on_gpu, _ = self.perf.estimate("cleanup", key, "vulkan", hw)
+            on_cpu, _ = self.perf.estimate("cleanup", key, "cpu", hw)
+            if on_gpu is not None and (on_cpu is None or on_gpu < on_cpu):
+                return "vulkan"
+        return "cpu"
+
+    RATING_TTL_S = 5.0  # the ratings and disk sizes change slowly; the status goes out often
+
+    def _rating(self, kind: str, key: str, installed: bool) -> tuple[str | None, Any, int]:
+        """(device, fit, disk bytes) for one model, kept a few seconds: working them out reads
+        the model files' sizes, and a download reports progress four times a second."""
+        cache = self._ratings
+        hit = cache.get((kind, key, installed))
+        if hit is not None and time.monotonic() - hit[0] < self.RATING_TTL_S:
+            return hit[1]
+        hw = self.compute.hardware
+        device = self._rated_device(kind, key)
+        if kind == "speech":
+            model = catalogue.get(key)
+            need_ram = hwinfo.speech_ram_gb(key, device, model.size_gb(device))
+            need_vram = SPEECH_VRAM_MB.get(key, 2900)
+            disk = library.speech_disk_bytes(model) if installed else 0
+        else:
+            entry = llm_manifest.CLEANUP_MODELS[key]
+            need_ram = hwinfo.cleanup_ram_gb(entry.approx_gb, device)
+            need_vram = cleanup_vram_mb(entry.approx_gb)
+            disk = library.cleanup_disk_bytes(key)
+        fit = modelchoice.fit(kind, key, device, hw, self.perf, ram_gb=need_ram, vram_mb=need_vram) if hw else None
+        cache[(kind, key, installed)] = (time.monotonic(), (device, fit, disk))
+        return device, fit, disk
+
+    def _recommendations(self, speech: list[dict], cleanup: list[dict]) -> list[dict]:
+        """Models that would make dictation better on this PC and are not in use (M4), each
+        with why, its size and what choosing it does. Only models that suit this PC; nothing
+        is recommended for its own sake.
+
+          more accurate speech   a Parakeet more accurate than the one in use
+          another language       Whisper, when the language set is one Parakeet does not know
+          auto-edits             turning them on, when they are off and the model suits the PC
+          quicker clean-up       a clean-up model that is quick here, when the one in use is not
+
+        `action`: "enable" turns auto-edits on; "download" fetches it, for Automatic to pick
+        up (Automatic only chooses between models on this PC); "use" switches to it, and
+        downloads it first if it has to."""
+        out: list[dict] = []
+        good = lambda row: (row.get("fit") or {}).get("rating") == "good"  # noqa: E731
+        auto = self.cfg.compute
+        # Under Automatic a model already on this PC and not in use was passed over for a reason
+        # (free memory right now, say): recommending it would argue with Automatic. One not on
+        # the PC is another matter - Automatic only chooses among the models that are.
+        open_to = lambda row, automatic: not (automatic and row["installed"])  # noqa: E731
+
+        def pick(kind: str, row: dict, why: str, automatic: bool) -> dict:
+            action = "use" if row["installed"] or not automatic else "download"
+            return {"kind": kind, "key": row["key"], "label": row["label"], "why": why, "size_gb": row["size_gb"],
+                    "installed": row["installed"], "action": action}
+
+        current = next((r for r in speech if r.get("current")), None)
+        if current is not None:
+            better = [r for r in speech if not r.get("current") and good(r) and r["key"] in modelchoice.SPEECH_ORDER
+                      and (r.get("accuracy") or 0) > (current.get("accuracy") or 0) and open_to(r, auto.auto_speech)]
+            if better:
+                row = max(better, key=lambda r: r.get("accuracy") or 0)
+                why = f"More accurate than {current['label']}"
+                if current.get("languages") == 1 and (row.get("languages") or 0) > 1:
+                    why += f", and it knows {row['languages']} languages"
+                out.append(pick("speech", row, why + ".", auto.auto_speech))
+        language = (self.cfg.stt.language or "").lower()
+        if language and language != "auto" and language not in catalogue.PARAKEET_LANGUAGES:
+            whisper = next((r for r in speech if r["key"] == "whisper-turbo"), None)
+            if whisper is not None and not whisper["installed"] and (whisper.get("fit") or {}).get("rating") != "too-big":
+                out.append({**pick("speech", whisper, "", False), "action": "download",
+                            "why": f"Your language is set to \"{language}\", which Parakeet does not know: "
+                                   f"Whisper turns it into text."})
+        pp = self.cfg.postprocess
+        if pp.llm_provider == "bundled":
+            chosen = next((r for r in cleanup if r["key"] == pp.llm_model), None)
+            hw = self.compute.hardware
+            if not pp.llm_cleanup:
+                # Below 9 GB it starts off on purpose (B5), and Models says why; not argued with here.
+                roomy = hw is None or hw.ram_gb >= hwinfo.LOW_MEMORY_GB
+                if chosen is not None and good(chosen) and roomy:
+                    size = "already on this PC" if chosen["installed"] else f"a {chosen['size_gb']:.1f} GB download"
+                    out.append({**pick("cleanup", chosen, "", False), "action": "enable",
+                                "why": f"Removes fillers, applies your self-corrections and formats lists and "
+                                       f"numbers. Uses {chosen['label']}, {size}."})
+            elif chosen is not None and (chosen.get("fit") or {}).get("rating") == "slow":
+                quick = [r for r in cleanup if r["key"] != chosen["key"] and good(r) and open_to(r, auto.auto_cleanup)]
+                if quick:
+                    row = max(quick, key=lambda r: r.get("accuracy") or 0)
+                    out.append(pick("cleanup", row, f"Quick on this PC, where {chosen['label']} is slow "
+                                                    f"({chosen['fit']['why']}).", auto.auto_cleanup))
+        return out
+
+    def _library_rows(self, kind: str, rows: list[dict]) -> list[dict]:
+        """The pickers' rows with what the library adds: how each model suits this PC, the disk
+        it takes, whether it can be removed, and its download if one is queued or running."""
+        out = []
+        for row in rows:
+            key = row["key"]
+            try:
+                device, fit, disk = self._rating(kind, key, bool(row.get("installed")))
+                in_use = self._speech_in_use(catalogue.get(key)) if kind == "speech" else self._cleanup_in_use(key)
+            except Exception:
+                log.debug("could not rate %s", key, exc_info=True)
+                device, fit, disk, in_use = None, None, 0, False
+            job = self.downloads.active(kind, key)
+            out.append({**row,
+                        "fit": {"rating": fit.rating, "why": fit.why} if fit else None,
+                        "rated_on": device,
+                        "disk_gb": round(disk / 1e9, 2),
+                        "removable": bool(disk) and not in_use and job is None,
+                        "download": job.id if job else None})
+        return out
 
     # where the models run, and which ------------------------------------------------------------------
     def _build_stt(self, cfg: STTConfig) -> Transcriber:
@@ -683,6 +891,12 @@ class Engine:
                 if self.llm_server is None or not self.llm_server.alive():
                     self._room_for_cleanup(device)
                     where = self._llama_device(device)
+                    # Through the download queue, so the Hub shows them: the model's first
+                    # download (2.5 GB) used to report to the log only.
+                    self._fetch_cleanup_runtime(where)
+                    if pp.llm_provider == "bundled" and pp.llm_model in llm_manifest.CLEANUP_MODELS \
+                            and not llm_manifest.gguf_path(pp.llm_model).exists():
+                        self._download_model("cleanup", pp.llm_model, "", "first-run")
                     self.llm_server = LlamaServer(model_key=pp.llm_model, device=where)
                     try:
                         self.llm_server.start(progress=self._download_progress)
@@ -693,6 +907,7 @@ class Engine:
                         # processor, and not the graphics again this session (B3)
                         log.warning("clean-up could not start on the built-in graphics (%s); using the processor", e)
                         self.compute.no_vulkan = True
+                        self._fetch_cleanup_runtime("cpu")
                         self.llm_server = LlamaServer(model_key=pp.llm_model, device="cpu")
                         self.llm_server.start(progress=self._download_progress)
                 return self.llm_server
@@ -703,6 +918,13 @@ class Engine:
             self.cleanup = pipeline
             self.llm_state = "ready"
             log.info("Clean-up model ready in %.1fs (%s:%s)", time.perf_counter() - t0, pp.llm_provider, pp.llm_model)
+        except fetch.Cancelled:
+            # The user stopped its first download: auto-edits off until they ask for them again
+            # (the Hub offers the download), rather than downloading it at every start.
+            log.info("the clean-up model's download was cancelled; auto-edits are off")
+            self.cfg.postprocess = replace(self.cfg.postprocess, llm_cleanup=False)
+            self._save_quietly()
+            self.llm_state, self.llm_error = "off", None
         except Exception as e:
             self.llm_state, self.llm_error = "error", problems.detail(e)
             self.llm_error_code = problems.classify_cleanup(e, pp.llm_provider)
@@ -766,16 +988,20 @@ class Engine:
 
     def _fetch_cuda_libs(self) -> None:
         self._broadcast_status()
-        last = [0.0]
 
-        def progress(done: int, total: int) -> None:
-            self.cuda_libs = {"state": "downloading", "done": done, "total": total}
-            if time.monotonic() - last[0] >= 1.0:
-                last[0] = time.monotonic()
-                self._broadcast_status()
+        def run(report: Callable[[int, int], None], stop: threading.Event) -> None:
+            def progress(done: int, total: int) -> None:
+                if stop.is_set():
+                    raise fetch.Cancelled()
+                self.cuda_libs = {"state": "downloading", "done": done, "total": total}
+                report(done, total)
+
+            cudalibs.ensure(progress)
 
         try:
-            cudalibs.ensure(progress)
+            # In the download queue with everything else; LocalFlow's own part, not cancellable.
+            self.downloads.fetch("gpu-libs", "cuda", "Graphics card libraries (NVIDIA CUDA)", cudalibs.DOWNLOAD_BYTES,
+                                 run, "automatic", cancellable=False)
         except Exception as e:
             self.cuda_libs = {"state": "error", "error": problems.detail(e)}
             log.warning("could not download the graphics card libraries: %s", e)
@@ -960,15 +1186,16 @@ class Engine:
         try:
             device = self.compute.speech_device_for(model)
             if not catalogue.is_installed(model, device):
-                from localflow import net
-
-                net.wait_for_proxy()
-                net.ensure_space(net.hf_cache_dir(), int(model.size_gb(device) * 1e9), model.label)
-                log.info("Downloading speech model %s (~%.1f GB)", model.label, model.size_gb(device))
-                catalogue.download(model, device, progress=self._speech_progress)
+                self._download_model("speech", model.key, device, "switch", progress=self._speech_progress)
             self._set_switch(state="loading", progress=1.0)
             with self._model_lock:
                 self._swap_speech(model, device)
+        except fetch.Cancelled:
+            log.info("switch to %s cancelled with its download", model.key)
+            with self._lock:
+                self.speech_switch = None
+            self._broadcast_status()
+            return
         except Exception as e:
             log.exception("could not switch to %s", model.key)
             self._set_switch(state="error", error=problems.detail(e), error_code=problems.SPEECH_SWITCH_FAILED,
@@ -1064,13 +1291,19 @@ class Engine:
             self._save_quietly()
 
     def _switch_cleanup(self, key: str) -> None:
-        from localflow.llm.server import ensure_model
-
         try:
-            ensure_model(key, progress=lambda _name, done, total: total and self._cleanup_progress(done, total))
+            if not llm_manifest.gguf_path(key).exists():
+                self._download_model("cleanup", key, "", "switch", progress=self._cleanup_progress)
+            self._fetch_cleanup_runtime(self._llama_device())
             self._set_cleanup_switch(state="loading", progress=1.0)
             with self._model_lock:
                 self._llm_pool.submit(self._swap_cleanup, key).result()
+        except fetch.Cancelled:
+            log.info("switch to %s cancelled with its download", key)
+            with self._lock:
+                self.cleanup_switch = None
+            self._broadcast_status()
+            return
         except Exception as e:
             log.exception("could not switch the clean-up model to %s", key)
             self._set_cleanup_switch(state="error", error=problems.detail(e),
@@ -1190,6 +1423,7 @@ class Engine:
         remote.discard_spare()
         self._pool.shutdown(wait=False, cancel_futures=True)
         self._llm_pool.shutdown(wait=False, cancel_futures=True)
+        self.downloads.close()
         if self.llm_server is not None:
             self.llm_server.stop()
 
@@ -1213,10 +1447,25 @@ class Engine:
         pp = self.cfg.postprocess
         entry = catalogue.current(self.cfg.stt)
         try:
-            choices = catalogue.describe(self.cfg.stt, self.compute.speech_device_for)
+            choices = self._library_rows("speech", catalogue.describe(self.cfg.stt, self.compute.speech_device_for))
         except Exception:
             log.debug("could not describe the speech models", exc_info=True)
             choices = []
+        downloads = self.downloads.views()
+        cleanup_choices = self._cleanup_choices()
+        try:
+            recommended = self._recommendations(choices, cleanup_choices)
+        except Exception:
+            log.debug("could not work out the recommendations", exc_info=True)
+            recommended = []
+
+        def first_download(kind: str, key: str | None) -> dict[str, Any] | None:
+            """The job that has to finish before `kind` works at all, as {label, progress, size_gb}."""
+            job = next((d for d in downloads if d["kind"] == kind and d["key"] == key
+                        and d["state"] in ("queued", "downloading")), None)
+            return {"label": job["label"], "progress": job["progress"], "size_gb": round(job["total"] / 1e9, 1),
+                    "state": job["state"], "id": job["id"]} if job else None
+
         return {
             "type": P.STATUS,
             "version": __version__,
@@ -1234,8 +1483,8 @@ class Engine:
                 "precision": getattr(stt, "precision", None),
                 "choices": choices,
                 "switch": self.speech_switch,
-                # A first run's download of the speech model: {label, progress 0-1, size_gb}.
-                "download": self.first_download,
+                # The download speech waits for, while it has none: {label, progress 0-1, size_gb, state, id}.
+                "download": first_download("speech", entry.key if entry else None) if self.state != "ready" else None,
             },
             "llm": {
                 "state": self.llm_state,
@@ -1245,9 +1494,16 @@ class Engine:
                 "provider": pp.llm_provider,
                 "model": pp.llm_model,
                 "label": self._cleanup_label(),
-                "choices": self._cleanup_choices(),
+                "choices": cleanup_choices,
                 "switch": self.cleanup_switch,
+                # What clean-up waits for while it loads: its model's download, or its runtime's.
+                "download": (first_download("cleanup", pp.llm_model) or first_download("runtime", None))
+                            if self.llm_state == "loading" else None,
             },
+            # Every download, running and queued first, then the last few finished (M1).
+            "downloads": downloads,
+            # Models that would make dictation better on this PC (M4).
+            "recommended": recommended,
             "compute": self.compute.status(),
             # Settings written by a newer LocalFlow: read, never saved over (their version).
             "settings_newer": self.cfg.newer,
@@ -1353,7 +1609,8 @@ class Engine:
 
         pp = self.cfg.postprocess
         try:
-            return M.describe(pp.llm_model if pp.llm_provider == "bundled" and pp.llm_cleanup else None)
+            return self._library_rows(
+                "cleanup", M.describe(pp.llm_model if pp.llm_provider == "bundled" and pp.llm_cleanup else None))
         except Exception:
             log.debug("could not describe the clean-up models", exc_info=True)
             return []

@@ -140,7 +140,8 @@ def test_a_first_run_without_a_connection_downloads_once_it_is_back(monkeypatch)
         codes = [m["stt"]["error_code"] for m in seen if m.get("stt", {}).get("error_code")]
         assert codes and set(codes) == {problems.SPEECH_DOWNLOAD_FAILED}
         progress = [m["stt"]["download"]["progress"] for m in seen if m.get("stt", {}).get("download")]
-        assert 1.0 in progress, "the download's progress was reported"
+        # to its end; never 100 % while still downloading - that is "done", below
+        assert max(progress) == 0.999, "the download's progress was reported"
         assert engine.status()["stt"]["download"] is None, "and cleared once done"
     finally:
         engine.shutdown()

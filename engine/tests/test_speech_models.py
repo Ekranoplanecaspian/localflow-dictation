@@ -105,17 +105,22 @@ def test_progress_reporter_forwards_only_the_bytes_written_bar():
     assert seen == [(1000 + 50 * MB, 1000 + 100 * MB), (1000 + 100 * MB, 1000 + 100 * MB)]
 
 
-def test_progress_reporter_follows_a_single_file_download_but_not_bytes_received():
+def test_bytes_received_move_the_bar_but_only_bytes_written_finish_it():
+    """Xet updates its bytes-received bar ten times a second and its bytes-written bar only per
+    large chunk (7 times in 51 s, measured 2026-10-01): received bytes lead, written ones end."""
     from localflow.hfprogress import reporter
 
     seen = []
     Reporter = reporter(lambda done, total: seen.append(done))
     MB = 1 << 20
     received = Reporter(total=100 * MB, desc="model.gguf: downloading bytes", unit="B")
-    plain = Reporter(total=100 * MB, desc="model.gguf", unit="B")
+    written = Reporter(total=100 * MB, desc="model.gguf", unit="B")
     received.update(80 * MB)
-    plain.update(40 * MB)
-    assert seen == [40 * MB]
+    written.update(40 * MB)  # behind what was received: the bar does not go back
+    received.update(20 * MB)  # all received, not all on disk
+    assert seen == [80 * MB, 100 * MB - 1]
+    written.update(60 * MB)
+    assert seen[-1] == 100 * MB
 
 
 # switching on a running engine ------------------------------------------------------------------

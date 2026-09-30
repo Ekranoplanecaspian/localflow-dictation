@@ -199,6 +199,44 @@
   font-weight: 600;
 }
 
+/* A first run's downloads (v0.2.1, M5): said on the welcome, with their sizes, and on "Try
+   it" as a bar that turns into "Ready" by itself. */
+.downloads-ahead {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+  max-width: 56ch;
+}
+
+.downloads-ahead b {
+  color: var(--ink);
+}
+
+.downloads-ahead ul {
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
+.waiting {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  font-size: var(--text-sm);
+  color: var(--ink-2);
+}
+
+.waiting .model-progress {
+  width: 100%;
+}
+
+.waiting .model-progress .track {
+  background: var(--line);
+}
+
 .chord-show kbd,
 .step .lede kbd {
   font-family: var(--font-mono);

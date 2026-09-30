@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import { Apps } from "./hub/Apps";
 import { Dictionary } from "./hub/Dictionary";
+import { DownloadStrip, navBadge } from "./hub/DownloadStrip";
 import { ErrorBoundary } from "./hub/ErrorBoundary";
 import { Help } from "./hub/Help";
 import { History } from "./hub/History";
@@ -13,9 +14,9 @@ import { Overview } from "./hub/Overview";
 import { statusPill } from "./hub/Status";
 import { Voice } from "./hub/Voice";
 import Onboarding from "./onboarding/Onboarding";
-import { SAMPLE, gettingReady, smallPc } from "./hub/sample";
+import { SAMPLE, firstRun, gettingReady, smallPc, withRecommendations } from "./hub/sample";
 import { HEALTH_SAMPLES } from "./hub/sampleHealth";
-import type { Health, HubData, Phase } from "./hub/types";
+import type { Download, Health, HubData, Phase } from "./hub/types";
 
 const SECTIONS = [
     { id: "overview", label: "Overview" },
@@ -62,6 +63,10 @@ export default function App() {
     const [toast, setToast] = useState<string | null>(null);
     const toastTimer = useRef<number | undefined>(undefined);
     const paneRef = useRef<HTMLElement>(null);
+    // Downloads move four times a second; the rest of the Hub refreshes every four. They are
+    // followed from the engine's own status messages, for the strip and the sidebar only.
+    const [downloads, setDownloads] = useState<Download[] | undefined>(undefined);
+    useEffect(() => setDownloads(data?.engine?.downloads), [data?.engine?.downloads]);
 
     const refresh = useCallback(async () => {
         if (DEMO) {
@@ -69,10 +74,13 @@ export default function App() {
             const pick = HEALTH_SAMPLES[PARAMS.get("health") ?? "ok"] ?? HEALTH_SAMPLES.ok;
             const sample = PARAMS.get("ram")
                 ? smallPc(Number(PARAMS.get("ram")))
-                : PARAMS.get("health") === "gpuprep"
-                  ? gettingReady()
-                  : SAMPLE;
-            setData({ ...sample, health: pick, link: { ...sample.link, safe_mode: pick === HEALTH_SAMPLES.safe } });
+                : PARAMS.get("first")
+                  ? firstRun()
+                  : PARAMS.get("health") === "gpuprep"
+                    ? gettingReady()
+                    : SAMPLE;
+            const shown = PARAMS.get("recs") ? withRecommendations(sample) : sample;
+            setData({ ...shown, health: pick, link: { ...shown.link, safe_mode: pick === HEALTH_SAMPLES.safe } });
             return;
         }
         setData(await invoke<HubData>("hub_data"));
@@ -115,6 +123,7 @@ export default function App() {
             listen<{ message?: string }>("engine-error", (e) =>
                 say(e.payload.message ?? "the engine reported a problem"),
             ),
+            listen<{ downloads?: Download[] }>("engine-status", (e) => setDownloads(e.payload.downloads)),
         ];
         return () => {
             clearInterval(timer);
@@ -124,6 +133,7 @@ export default function App() {
     }, [refresh, say]);
 
     const pill = statusPill(data?.health ?? null);
+    const badge = navBadge(downloads);
 
     // First run: the wizard owns the window until it is finished or skipped. Waiting for
     // `data` avoids a flash of the Hub before we know which of the two to show.
@@ -147,6 +157,11 @@ export default function App() {
                                 onClick={() => go(s.id)}
                             >
                                 {s.label}
+                                {s.id === "models" && badge && (
+                                    <span className="nav-badge" title="Downloading">
+                                        {badge}
+                                    </span>
+                                )}
                             </button>
                         </li>
                     ))}
@@ -162,6 +177,7 @@ export default function App() {
 
             <main className="pane" ref={paneRef}>
                 {!data && <p className="muted">Loading…</p>}
+                {data && <DownloadStrip downloads={downloads} onOpen={() => go("models")} say={say} />}
                 {data && (
                     // Keyed by page: moving to another page starts it without the last one's fault.
                     <ErrorBoundary

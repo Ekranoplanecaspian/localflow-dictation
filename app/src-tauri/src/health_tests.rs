@@ -78,6 +78,20 @@ fn clean_up_turned_off_or_resting_is_not_a_problem() {
 }
 
 #[test]
+fn clean_up_downloading_its_model_says_so_rather_than_loading() {
+    let mut s = working();
+    s["llm"]["state"] = json!("loading");
+    s["llm"]["download"] = json!({"id": "d4", "label": "Qwen3 4B", "progress": 0.456, "size_gb": 2.5, "state": "downloading"});
+    let h = assess_with(&link(Link::Ready), Some(&s), &mic(), true);
+    let c = get(&h, "cleanup");
+    assert_eq!((c.level, c.summary.as_str(), c.headline.as_str()), (Level::Starting, "Downloading 46 %", "Downloading Qwen3 4B (2.5 GB)"));
+    assert!(c.reason.as_deref().unwrap_or("").starts_with("Auto-edits start as soon as it is here"));
+    s["llm"]["download"]["state"] = json!("queued");
+    let h = assess_with(&link(Link::Ready), Some(&s), &mic(), true);
+    assert_eq!(get(&h, "cleanup").summary, "Waiting to download");
+}
+
+#[test]
 fn an_engine_that_cannot_start_is_one_problem_not_four() {
     let mut l = link(Link::Failed);
     l.detail = Some("the engine exited (exit code: 1)".into());
@@ -275,25 +289,25 @@ fn a_problem_that_gets_worse_is_announced_again() {
 fn a_press_is_refused_with_the_actual_reason() {
     let s = working();
     let ok = assess_with(&link(Link::Ready), Some(&s), &mic(), true);
-    assert_eq!(refusal(&link(Link::Ready), true, Some(&ok)), None);
-    assert_eq!(refusal(&link(Link::Ready), true, None), None, "no assessment yet is no reason to refuse");
+    assert_eq!(refusal(&link(Link::Ready), true, Some(&ok), None), None);
+    assert_eq!(refusal(&link(Link::Ready), true, None, None), None, "no assessment yet is no reason to refuse");
 
     let said = |r: Option<(&'static str, String)>| r.map(|(code, text)| (code, text));
     for state in [Link::Starting, Link::Connecting, Link::Reconnecting] {
         assert_eq!(
-            said(refusal(&link(state), false, None)),
+            said(refusal(&link(state), false, None, None)),
             Some(("engine-restarting", "Engine restarting — try again in a moment".into()))
         );
     }
     assert_eq!(
-        said(refusal(&link(Link::Failed), false, None)),
+        said(refusal(&link(Link::Failed), false, None, None)),
         Some(("engine-wont-start", "LocalFlow's engine isn't running — see LocalFlow".into()))
     );
     let mut missing = link(Link::Failed);
     missing.detail = Some("could not start the engine process: program not found (os error 2)".into());
-    assert_eq!(refusal(&missing, false, None).map(|r| r.0), Some("engine-missing"));
+    assert_eq!(refusal(&missing, false, None, None).map(|r| r.0), Some("engine-missing"));
     assert_eq!(
-        said(refusal(&link(Link::Ready), false, Some(&ok))),
+        said(refusal(&link(Link::Ready), false, Some(&ok), None)),
         Some(("speech-loading", "Warming up — try again in a moment".into()))
     );
 
@@ -302,20 +316,38 @@ fn a_press_is_refused_with_the_actual_reason() {
     e["stt"]["error_code"] = json!("speech-download-failed");
     let no_speech = assess_with(&link(Link::Ready), Some(&e), &mic(), true);
     assert_eq!(
-        said(refusal(&link(Link::Ready), false, Some(&no_speech))),
+        said(refusal(&link(Link::Ready), false, Some(&no_speech), None)),
         Some(("speech-download-failed", "The speech model isn't downloaded yet — see LocalFlow".into()))
     );
 
     let m = Mic { device: None, error: Some("no microphone".into()), ..Mic::default() };
     let no_mic = assess_with(&link(Link::Ready), Some(&s), &m, true);
     assert_eq!(
-        said(refusal(&link(Link::Ready), true, Some(&no_mic))),
+        said(refusal(&link(Link::Ready), true, Some(&no_mic), None)),
         Some(("mic-unavailable", "Microphone unavailable — see LocalFlow".into()))
     );
 
     // A chosen microphone that is missing still records with the default: not refused.
     let fallback = assess_with(&link(Link::Ready), Some(&s), &Mic { chosen: "Blue Yeti".into(), ..mic() }, true);
-    assert_eq!(refusal(&link(Link::Ready), true, Some(&fallback)), None);
+    assert_eq!(refusal(&link(Link::Ready), true, Some(&fallback), None), None);
+}
+
+#[test]
+fn a_press_during_the_first_download_says_how_far_it_has_got() {
+    let mut s = working();
+    s["stt"] = json!({"state": "loading", "label": "Parakeet v3",
+                      "download": {"id": "d1", "label": "Parakeet v3", "progress": 0.453, "size_gb": 2.6, "state": "downloading"}});
+    s["downloads"] = json!([{"id": "d1", "state": "downloading", "eta_s": 130}]);
+    let words = speech_download_words(&s);
+    assert_eq!(words.as_deref(), Some("45 %, about 2 min left"));
+    let h = assess_with(&link(Link::Ready), Some(&s), &mic(), true);
+    assert_eq!(
+        refusal(&link(Link::Ready), false, Some(&h), words.as_deref()),
+        Some(("speech-downloading", "Still downloading the speech model — 45 %, about 2 min left".into()))
+    );
+    s["stt"]["download"]["state"] = json!("queued");
+    assert_eq!(speech_download_words(&s).as_deref(), Some("waiting to start"));
+    assert_eq!(speech_download_words(&working()), None, "no download: loading, as before");
 }
 
 fn with_inputs(status: &Value, mic_blocked: bool, settings_unwritable: Option<(String, String)>) -> Health {
@@ -338,7 +370,7 @@ fn a_microphone_blocked_by_windows_fails_even_though_its_stream_opened() {
     assert_eq!((p.level, p.code, h.overall), (Level::Failed, Some("mic-blocked"), Level::Failed));
     assert_eq!(p.action.as_ref().map(|a| a.id), Some("privacy_microphone"));
     assert_eq!(
-        refusal(&link(Link::Ready), true, Some(&h)),
+        refusal(&link(Link::Ready), true, Some(&h), None),
         Some(("mic-blocked", "Microphone blocked — see LocalFlow".into()))
     );
 }

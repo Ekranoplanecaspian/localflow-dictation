@@ -83,6 +83,19 @@ class NotEnoughMemory(Exception):
     MemoryError - nothing ran out - so it is told apart from a load that did."""
 
 
+class Classified(Exception):
+    """An error already told apart somewhere else - a download's own process (fetch.py) - that
+    arrives as its problem code and its sentence. The classifiers pass the code on as it is."""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+
+
+def _classified(exc: BaseException) -> str | None:
+    return next((e.code for e in _chain(exc) if isinstance(e, Classified)), None)
+
+
 _NO_INTERNET_WORDS = ("getaddrinfo failed", "name or service not known", "temporary failure in name resolution",
                       "nodename nor servname", "no address associated with hostname")
 
@@ -166,6 +179,8 @@ def is_damaged(exc: BaseException) -> bool:
 
 def classify_speech(exc: BaseException) -> str:
     """Why the speech model would not load."""
+    if (code := _classified(exc)) is not None:
+        return code
     text = _text(exc)
     if "cuda requested but unavailable" in text:
         return SPEECH_GPU_UNAVAILABLE
@@ -184,6 +199,8 @@ def classify_speech(exc: BaseException) -> str:
 
 def classify_cleanup(exc: BaseException, provider: str) -> str:
     """Why AI clean-up would not start. `provider` is `bundled` or a cloud provider's name."""
+    if (code := _classified(exc)) is not None:
+        return code
     text = _text(exc)
     cloud = provider != "bundled"
     if any(isinstance(e, NotEnoughMemory) for e in _chain(exc)):

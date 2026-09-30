@@ -8,6 +8,7 @@
 mod audio;
 mod context;
 mod diagnostics;
+mod downloads;
 mod words;
 mod e2e;
 mod engine;
@@ -370,6 +371,47 @@ fn save_engine_settings(
     Ok(())
 }
 
+/// Setup was finished before the speech model was ready: say so, once, when it is (M5).
+#[tauri::command]
+fn notify_when_ready(chord: String) {
+    downloads::tell_when_ready(chord.chars().take(40).collect());
+}
+
+/// The model library (Hub > Models): download a model without switching to it, stop a
+/// download, or remove a model. The engine answers with a status, or with an error the Hub shows.
+#[tauri::command]
+fn model_action(
+    engine: tauri::State<'_, Engine>,
+    action: String,
+    kind: Option<String>,
+    key: Option<String>,
+    id: Option<String>,
+) -> Result<(), String> {
+    if !engine.is_connected() {
+        return Err("the engine is not connected".into());
+    }
+    engine.send(model_message(&action, kind.as_deref(), key.as_deref(), id.as_deref())?);
+    Ok(())
+}
+
+fn model_message(action: &str, kind: Option<&str>, key: Option<&str>, id: Option<&str>) -> Result<Value, String> {
+    let short = |s: Option<&str>, what: &str| match s {
+        Some(v) if !v.is_empty() && v.len() <= 64 => Ok(v.to_owned()),
+        _ => Err(format!("a model action needs its {what}")),
+    };
+    match action {
+        "download" | "remove" => {
+            let kind = short(kind, "kind")?;
+            if kind != "speech" && kind != "cleanup" {
+                return Err(format!("no such kind of model: {kind}"));
+            }
+            Ok(json!({"type": format!("models.{action}"), "kind": kind, "key": short(key, "key")?}))
+        }
+        "cancel" => Ok(json!({"type": "models.cancel", "id": short(id, "download")?})),
+        other => Err(format!("no such model action: {other}")),
+    }
+}
+
 /// Minimal RIFF/WAVE reader: 16-bit PCM only, downmixed to mono. The benchmark corpus is
 /// already 16 kHz, and anything else is rejected rather than silently resampled.
 pub(crate) fn read_wav_16k_mono(path: &str) -> anyhow::Result<Vec<i16>> {
@@ -418,6 +460,23 @@ pub(crate) fn read_wav_16k_mono(path: &str) -> anyhow::Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_actions_become_engine_messages_and_nothing_else_does() {
+        assert_eq!(
+            model_message("download", Some("cleanup"), Some("phi-4-mini"), None).unwrap(),
+            json!({"type": "models.download", "kind": "cleanup", "key": "phi-4-mini"})
+        );
+        assert_eq!(
+            model_message("remove", Some("speech"), Some("parakeet-v2"), None).unwrap(),
+            json!({"type": "models.remove", "kind": "speech", "key": "parakeet-v2"})
+        );
+        assert_eq!(model_message("cancel", None, None, Some("d3")).unwrap(), json!({"type": "models.cancel", "id": "d3"}));
+        assert!(model_message("shutdown", Some("speech"), Some("x"), None).is_err());
+        assert!(model_message("download", Some("tools"), Some("x"), None).is_err());
+        assert!(model_message("remove", Some("speech"), None, None).is_err());
+        assert!(model_message("cancel", None, None, Some(&"x".repeat(65))).is_err());
+    }
 
     fn wav(channels: u16, rate: u32, bits: u16, samples: &[i16]) -> Vec<u8> {
         let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -663,6 +722,8 @@ pub fn run() {
             clear_history,
             save_settings,
             save_engine_settings,
+            model_action,
+            notify_when_ready,
             open_windows_settings,
             export_diagnostics,
             reset_preferences,
@@ -848,7 +909,13 @@ fn wire_events(app: &AppHandle) {
     });
 
     let handle = app.clone();
-    app.listen("engine-status", move |_| health::refresh(&handle));
+    app.listen("engine-status", move |event| {
+        health::refresh(&handle);
+        // the tray's download ring and the "downloaded" notifications (M3)
+        if let Ok(status) = serde_json::from_str::<Value>(event.payload()) {
+            downloads::on_status(&handle, &status);
+        }
+    });
 
     let handle = app.clone();
     app.listen("audio-device", move |event| {

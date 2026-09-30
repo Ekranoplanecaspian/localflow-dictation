@@ -16,7 +16,8 @@ CATALOGUE = json.loads((REPO / "shared" / "problems.json").read_text(encoding="u
 BY_CODE = {p["code"]: p for p in CATALOGUE}
 LEVELS = {"failed", "degraded", "info", "handled", "internal"}
 PARTS = {"engine", "speech", "cleanup", "gpu", "microphone", "hotkey", "storage", "network"}
-PLACEHOLDERS = {"detail", "model", "to", "device", "chosen", "app", "version", "needed", "folder", "free", "drive"}
+PLACEHOLDERS = {"detail", "model", "to", "device", "chosen", "app", "version", "needed", "folder", "free", "drive",
+                "progress"}
 ACTIONS = {"restart_engine", "open_models", "open_voice", "open_apps", "privacy_microphone", "sound",
            "storage", "date_time", "redownload_models"}
 

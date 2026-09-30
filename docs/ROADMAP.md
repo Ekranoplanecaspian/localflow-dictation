@@ -537,7 +537,11 @@ and a later rename changes the display name only, never the folders)
       `llama-server.exe` and `app.exe` by name - LM Studio's server included; now only processes
       running from the install folder or %LOCALAPPDATA%\LocalFlow. Found, for later: Tauri's own
       "is it running" check still stops any `app.exe` of the current user by name - give the
-      binary its own name (`mainBinaryName`) in 0.3, with the Run key and shortcuts moved over
+      binary its own name (`mainBinaryName`) in 0.3, with the Run key and shortcuts moved over.
+      Also for 0.3: installing over v0.1.0 leaves v0.1's `localflow-engine\_internal\nvidia`
+      (1.5 GB of CUDA libraries) in place - NSIS overwrites files but removes none - and
+      `cudalibs.bundled()` then finds and uses them instead of the pinned download. The
+      installer should empty `localflow-engine\` before copying the new one
 - [x] D12 CI green (GitHub Actions, both repos; red since mid-September). Fixed 2026-09-30: the
       engine tests set what they assumed of the development PC (CUDA libraries, 12 cores,
       onnxruntime-gpu, no first-run download for the module-wide engine); CI gives cargo check a
@@ -707,6 +711,56 @@ Known limits: moving work to the processor frees the graphics card and its memor
 remove heat on a laptop whose CPU and GPU share cooling - the biggest heat saving is the
 "no keep-warm" step. (The 0.35 GB of VRAM that used to stay after an idle release is gone since
 A4: speech on the graphics card runs in a worker process that the idle release ends.)
+
+## Version 0.2.1: models you can see (planned 2026-09-30)
+
+Found installing v0.2.0 from GitHub on a wiped PC: setup's "Try it" says "a few seconds" while
+the 2.6 GB speech model is still downloading (the hotkey is ignored silently meanwhile); the
+clean-up model's first download reports progress to the log only, so the Hub says "loading" for
+minutes; nothing says which other models there are, which suit this PC, or what they are for.
+Decided 2026-09-30: ship as v0.2.1 in today's look (0.3's design restyles it); downloads shown
+in a strip on every Hub page, in the tray, and by a notification when done; LocalFlow suggests
+models once after setup and on the Models page, nowhere else.
+
+- [x] M1 Engine downloads (2026-10-01): one queue for every download (speech, clean-up, its
+      runtime, the CUDA libraries), one at a time, most urgent first (first run, switch,
+      LocalFlow's own parts, library), with bytes, speed, time left and state in
+      status.downloads; the clean-up model's first download, which showed in the log only, now
+      shows. Download without switching, cancel, remove (never the model in use), and each
+      model rated for this PC (modelchoice.fit). Found: Xet downloads - 7-15x quicker here than
+      huggingface_hub's plain HTTP (11-22 against 1.5-3 MB/s) - cannot be stopped from their
+      progress callback and never resume, so each model downloads in a process of its own
+      (`localflow fetch`) that a cancel ends at once (0.03 s, nothing left on disk); pause was
+      dropped for that reason. Progress follows bytes received as well as written: 130 updates
+      in 31 s where there were 7
+- [x] M2 Model library (Hub, Models): every speech and clean-up model as a card - in use / on
+      this PC with its disk / not downloaded with its size, how it suits this PC and why, its
+      download's progress - with Download only, Cancel download and Remove (asks once more)
+- [x] M3 Downloads you cannot miss: a strip on every Hub page (model, progress, speed, time
+      left, Cancel, what is next, what just arrived or failed), the percentage beside Models,
+      the tray ring filling with the download and its tooltip, a notification per model that
+      arrives, and "Auto-edits are ready" once clean-up has downloaded and loaded. Speech and
+      Auto-edits say where they stand at the top of their cards; the Status card says
+      "Downloading 46 %" for clean-up
+- [x] M4 Suggestions: "Recommended for this PC" on Models - a more accurate Parakeet, Whisper
+      only for a language Parakeet does not know, auto-edits when off and suited (never below
+      9 GB, B5), a quicker clean-up model when the one in use is slow; never a model Automatic
+      already has and passed over - and "Your models" once on Overview after setup
+- [x] M5 First run: the welcome lists what downloads and how big; "Try it" shows the speech
+      model's download and turns ready by itself; finishing or skipping setup early brings one
+      "LocalFlow is ready" notification; a press during the download says "Still downloading
+      the speech model - 45 %, about 2 min left" (speech-downloading)
+- [x] M6 Build, install on a wiped PC, publish v0.2.1 (2026-10-01). The installer (171 MB)
+      installed silently in 13 s on the development PC wiped of LocalFlow; the real first run
+      downloaded Parakeet v3, the clean-up runtime, Qwen3 4B and the CUDA libraries one at a
+      time, "LocalFlow is ready" and "Auto-edits are ready" arrived as notifications, and the
+      strip, the Models percentage and "Your models" showed in the real window. Found on it and
+      fixed: the speech worker, started early, downloaded the speech model a second time beside
+      the queue's download - 4.9 GB kept instead of 2.5 and 100 s more before speech was ready;
+      v0.2.0 had it too (now it preloads only a model already here; checked on a scratch first
+      run: 2.55 GB, ready in 94 s); and "100 %" was shown for the 20 s Xet spends writing the
+      file. Seen but not a product bug: an app started from a program that was running before
+      LOCALFLOW_ENGINE_EXE was removed inherits it and uses the repository's engine
 
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only

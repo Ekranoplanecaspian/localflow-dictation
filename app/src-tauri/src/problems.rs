@@ -65,6 +65,7 @@ codes! {
     ENGINE_LOST_MID_TAKE = "engine-lost-mid-take",
     TAKE_LOST = "take-lost",
     SPEECH_LOADING = "speech-loading",
+    SPEECH_DOWNLOADING = "speech-downloading",
     SPEECH_LOAD_FAILED = "speech-load-failed",
     SPEECH_SWITCH_FAILED = "speech-switch-failed",
     CLEANUP_LOAD_FAILED = "cleanup-load-failed",

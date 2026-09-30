@@ -326,7 +326,22 @@ fn cleanup_part(status: Option<&Value>, safe_mode: bool) -> Part {
             trouble("cleanup", "AI clean-up", false, code, &[("detail", &detail), ("model", &label)])
         }
         // "loading", or "off" for the moment between turning it on and the load starting
-        _ => p(Level::Starting, "Loading".into(), format!("Loading {label}")),
+        _ => match llm.and_then(|l| l.get("download")).filter(|d| d.is_object()) {
+            // Its first download (2.5 GB or so): it used to say "Loading" for minutes.
+            Some(d) => {
+                let what = text(Some(d), &["label"]).unwrap_or(&label).to_owned();
+                let summary = if text(Some(d), &["state"]) == Some("queued") {
+                    "Waiting to download".to_owned()
+                } else {
+                    let pct = d.get("progress").and_then(Value::as_f64).unwrap_or(0.0) * 100.0;
+                    format!("Downloading {pct:.0} %")
+                };
+                let size = d.get("size_gb").and_then(Value::as_f64).map(|g| format!(" ({g:.1} GB)")).unwrap_or_default();
+                p(Level::Starting, summary, format!("Downloading {what}{size}"))
+                    .because("Auto-edits start as soon as it is here; until then dictation works without them.")
+            }
+            None => p(Level::Starting, "Loading".into(), format!("Loading {label}")),
+        },
     }
 }
 
@@ -482,7 +497,8 @@ fn sentence(s: &str) -> String {
 /// Why a press of the hotkey cannot start a take right now: the problem, and its words for the
 /// flow bar. None when it can. The link and the speech model are read live, because the
 /// assessment is only refreshed on events and a press must not be refused on a stale one.
-pub fn refusal(link: &LinkState, speech_ready: bool, health: Option<&Health>) -> Option<(&'static str, String)> {
+pub fn refusal(link: &LinkState, speech_ready: bool, health: Option<&Health>,
+               downloading: Option<&str>) -> Option<(&'static str, String)> {
     // the code of a failed part, as the assessment found it
     let failed = |id: &str| {
         health
@@ -499,7 +515,16 @@ pub fn refusal(link: &LinkState, speech_ready: bool, health: Option<&Health>) ->
         _ => return say(problems::ENGINE_RESTARTING),
     }
     if !speech_ready {
-        return say(failed("speech").unwrap_or(problems::SPEECH_LOADING));
+        if let Some(code) = failed("speech") {
+            return say(code);
+        }
+        // A first run's download takes minutes: "try again in a moment" sent people pressing
+        // the hotkey again and again (found on a wiped PC, 2026-09-30).
+        if let Some(progress) = downloading {
+            let code = problems::SPEECH_DOWNLOADING;
+            return Some((code.as_str(), problems::bar(code, &[("progress", progress)])));
+        }
+        return say(problems::SPEECH_LOADING);
     }
     if let Some(code) = failed("microphone") {
         return say(code);
@@ -507,11 +532,33 @@ pub fn refusal(link: &LinkState, speech_ready: bool, health: Option<&Health>) ->
     None
 }
 
+/// How far the speech model's download has got, in words ("45 %, about 2 min left"), or None
+/// when speech is not waiting for one.
+pub fn speech_download_words(status: &Value) -> Option<String> {
+    let d = status.get("stt").and_then(|s| s.get("download")).filter(|d| d.is_object())?;
+    if text(Some(d), &["state"]) == Some("queued") {
+        return Some("waiting to start".into());
+    }
+    let pct = d.get("progress").and_then(Value::as_f64).unwrap_or(0.0) * 100.0;
+    let id = text(Some(d), &["id"]);
+    let eta = status
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|jobs| jobs.iter().find(|j| text(Some(j), &["id"]) == id))
+        .and_then(|j| j.get("eta_s"))
+        .and_then(Value::as_f64);
+    Some(match eta {
+        Some(s) => format!("{pct:.0} %, {}", crate::downloads::eta_words(s)),
+        None => format!("{pct:.0} %"),
+    })
+}
+
 /// `refusal` for the running app.
 pub fn refusal_now(app: &AppHandle) -> Option<(&'static str, String)> {
     let engine = app.try_state::<Engine>()?;
     let current = app.try_state::<Arc<Monitor>>().and_then(|m| m.current.locked().clone());
-    refusal(&engine.link(), engine.stt_ready(), current.as_ref())
+    let downloading = engine.status().as_ref().and_then(speech_download_words);
+    refusal(&engine.link(), engine.stt_ready(), current.as_ref(), downloading.as_deref())
 }
 
 /// A problem with the take being spoken: a tag on the flow bar beside the words, which go on.

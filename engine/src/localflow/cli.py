@@ -79,14 +79,23 @@ def _install_crash_hooks(fault_path=FAULT_PATH) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-def cmd_serve(cfg: Config, port: int, token: str | None, handshake: bool) -> int:
-    if cfg.stt.device != "cpu":
-        # First thing: the speech worker starts loading the model the engine will most likely ask
-        # for - the saved one, on the graphics card (the settings Engine._speech_cfg makes) -
-        # while the engine itself starts up.
-        from localflow.stt import remote
+def prestart_speech(cfg: Config) -> None:
+    """First thing: the speech worker starts loading the model the engine will most likely ask
+    for - the saved one, on the graphics card (the settings Engine._speech_cfg makes) - while
+    the engine itself starts up. Only a model already on this PC: one that is not would be
+    downloaded by the worker itself, beside the engine's own download of it - on a real first
+    run the 2.4 GB of Parakeet v3 came down twice and was kept twice (2026-10-01)."""
+    if cfg.stt.device == "cpu":
+        return
+    from localflow.stt import catalogue, remote
 
-        remote.prestart(replace(cfg.stt, device="cuda" if cfg.stt.device == "cuda" else "auto"))
+    entry = catalogue.current(cfg.stt)
+    here = entry is None or any(catalogue.is_installed(entry, d) for d in ("cuda", "cpu"))
+    remote.prestart(replace(cfg.stt, device="cuda" if cfg.stt.device == "cuda" else "auto") if here else None)
+
+
+def cmd_serve(cfg: Config, port: int, token: str | None, handshake: bool) -> int:
+    prestart_speech(cfg)
     from localflow.service.server import serve
 
     return serve(cfg, port=port, token=token, handshake=handshake)
@@ -346,6 +355,10 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--token", default=None, help="auth token (default: random, printed with --handshake)")
     sv.add_argument("--handshake", action="store_true", help="print {port, token, pid} as JSON on stdout when ready")
     sub.add_parser("speech-worker", help=argparse.SUPPRESS)  # the engine's GPU speech process (stt/remote.py)
+    fe = sub.add_parser("fetch", help=argparse.SUPPRESS)  # one model download the engine can stop (fetch.py)
+    fe.add_argument("kind")
+    fe.add_argument("key")
+    fe.add_argument("device", nargs="?", default="cpu")
     sw = sub.add_parser("send-wav", help="stream a WAV through the engine like a dictation (latency test)")
     sw.add_argument("wav")
     sw.add_argument("--fast", action="store_true", help="send audio as fast as possible instead of real time")
@@ -403,6 +416,11 @@ def main(argv: list[str] | None = None) -> None:
         from localflow.stt.remote import worker_main
 
         sys.exit(worker_main())
+    if args.cmd == "fetch":
+        # Its stdout is the channel too. The proxy and mirror come from the engine's environment.
+        from localflow.fetch import child_main
+
+        sys.exit(child_main([args.kind, args.key, args.device]))
     cfg = Config.load()
     _setup_logging(args.log_level or cfg.log_level)
     # Before anything imports huggingface_hub (it reads the mirror once), and before any child

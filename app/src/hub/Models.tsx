@@ -1,9 +1,73 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Compute } from "./Compute";
-import { ModelPicker } from "./ModelPicker";
-import type { ComputeStatus, HubData, PostProcess, SectionProps } from "./types";
+import { formatSize } from "./downloads";
+import { ModelPicker, Progress } from "./ModelPicker";
+import { Recommended } from "./Recommended";
+import type { ComputeStatus, HubData, ModelChoice, ModelState, PostProcess, SectionProps } from "./types";
+
+/**
+ * Where a part stands, in words, at the top of its card: off, waiting for its download (with the
+ * bar), loading, resting, ready - or not working and why. AI clean-up used to say only "loading"
+ * while its model downloaded for minutes (v0.2.1, M3).
+ */
+function PartStatus({ part, state, enabled }: { part: "speech" | "cleanup"; state?: ModelState; enabled: boolean }) {
+    const label = state?.label ?? state?.model ?? (part === "speech" ? "The speech model" : "The clean-up model");
+    let tone = "warn";
+    let body: ReactNode;
+    if (!enabled) {
+        tone = "off";
+        body = <>Off: dictation is tidied by the basic rules only.</>;
+    } else if (state?.download) {
+        const d = state.download;
+        body = (
+            <>
+                <b>{d.state === "queued" ? `Waiting to download ${d.label}` : `Downloading ${d.label}`}</b>
+                {part === "cleanup" ? " · auto-edits start as soon as it is here" : " · dictation starts as soon as it is here"}
+                <Progress
+                    value={d.state === "queued" ? null : d.progress}
+                    text={d.state === "queued" ? "Waiting its turn" : `${Math.floor(d.progress * 100)}% of ${formatSize(d.size_gb)}`}
+                />
+            </>
+        );
+    } else if (state?.state === "ready") {
+        tone = "good";
+        body = (
+            <>
+                <b>Ready</b> ·{" "}
+                {part === "cleanup" ? `${label} tidies what you dictate` : `${label} turns your voice into text`}
+            </>
+        );
+    } else if (state?.state === "asleep") {
+        tone = "good";
+        body = <><b>Resting</b> · unloaded while LocalFlow is idle; your next dictation wakes it</>;
+    } else if (state?.state === "error") {
+        tone = "bad";
+        body = <><b>Not working</b> · {state.error ?? "it did not start"}</>;
+    } else {
+        body = (
+            <>
+                <b>Loading {label}…</b>
+                <Progress value={null} text="A few seconds" />
+            </>
+        );
+    }
+    return <div className={`part-status ${tone}`}>{body}</div>;
+}
+
+/** One line above a model list: which of them are on this PC, and the disk they take. */
+function OnThisPc({ choices }: { choices?: ModelChoice[] }) {
+    if (!choices?.length) return null;
+    const here = choices.filter((m) => m.installed);
+    if (!here.length) return <p className="model-summary">None of these is on this PC yet.</p>;
+    const disk = here.reduce((sum, m) => sum + (m.disk_gb || m.size_gb), 0);
+    return (
+        <p className="model-summary">
+            On this PC: {here.map((m) => m.label).join(", ")} · {formatSize(disk)} in all
+        </p>
+    );
+}
 
 type EngineStatus = NonNullable<HubData["engine"]>;
 
@@ -78,6 +142,21 @@ export function Models({ data, onChange, say }: SectionProps) {
         }
     };
 
+    /** The library's own actions: download without switching, stop a download, remove a model. */
+    const modelAction = async (action: "download" | "cancel" | "remove", kind: string, keyOrId: string) => {
+        try {
+            await invoke("model_action", action === "cancel" ? { action, id: keyOrId } : { action, kind, key: keyOrId });
+        } catch (e) {
+            say(String(e));
+        }
+    };
+    const library = (kind: "speech" | "cleanup") => ({
+        downloads: live?.downloads ?? [],
+        onDownload: (key: string) => void modelAction("download", kind, key),
+        onCancel: (id: string) => void modelAction("cancel", kind, id),
+        onRemove: (key: string) => void modelAction("remove", kind, key),
+    });
+
     const saveCompute = async (
         patch: Partial<Pick<ComputeStatus, "mode" | "temp_limit_c" | "idle_release_min">> & {
             auto_speech?: boolean;
@@ -112,6 +191,11 @@ export function Models({ data, onChange, say }: SectionProps) {
                 <p>Which models turn your voice into text and tidy it up, and where they run.</p>
             </header>
 
+            <article className="card">
+                <h2>Recommended for this PC</h2>
+                <Recommended data={live ? { ...data, engine: live } : data} say={say} />
+            </article>
+
             <Compute
                 compute={live?.compute}
                 cleanupElsewhere={cleanupElsewhere}
@@ -121,11 +205,14 @@ export function Models({ data, onChange, say }: SectionProps) {
 
             <article className="card">
                 <h2>Speech</h2>
+                <PartStatus part="speech" state={stt} enabled />
+                <OnThisPc choices={stt?.choices} />
                 {stt?.choices?.length ? (
                     <ModelPicker
                         label="Speech model"
                         choices={stt.choices}
                         change={stt.switch}
+                        {...library("speech")}
                         enabled={connected}
                         onPick={(key) => void pickSpeech(key)}
                         auto={
@@ -148,23 +235,17 @@ export function Models({ data, onChange, say }: SectionProps) {
                         {stt?.precision ? ` · ${stt.precision}` : ""}
                     </span>
                 </div>
-                <div className="row">
-                    <span className="k">State</span>
-                    <span className={`v ${stt?.state === "ready" ? "good" : "warn"}`}>
-                        {stt?.state ?? "—"}
-                        {stt?.error ? ` · ${stt.error}` : ""}
-                    </span>
-                </div>
                 <p className="note">
-                    Everything here runs on this computer. Models download once, the first time
-                    you choose them, and the one you were using keeps working until the new one
-                    is ready. With Parakeet, a language it does not know goes to Whisper
-                    automatically.
+                    Everything here runs on this computer. Choosing a model downloads it once, and
+                    the one you were using keeps working until the new one is ready; "Download only"
+                    fetches one to have it ready without switching. With Parakeet, a language it does
+                    not know goes to Whisper automatically.
                 </p>
             </article>
 
             <article className="card">
                 <h2>Auto-edits</h2>
+                <PartStatus part="cleanup" state={llm} enabled={draft.llm_cleanup ?? true} />
                 <label className="toggle">
                     <input
                         type="checkbox"
@@ -207,11 +288,13 @@ export function Models({ data, onChange, say }: SectionProps) {
                     </p>
                 )}
 
+                {provider === "bundled" && <OnThisPc choices={llm?.choices} />}
                 {provider === "bundled" && llm?.choices?.length ? (
                     <ModelPicker
                         label="Clean-up model"
                         choices={llm.choices}
                         change={llm.switch}
+                        {...library("cleanup")}
                         enabled={connected}
                         onPick={(key) => void pickCleanup(key)}
                         auto={
@@ -258,13 +341,6 @@ export function Models({ data, onChange, say }: SectionProps) {
                     </div>
                 )}
 
-                <div className="row">
-                    <span className="k">State</span>
-                    <span className={`v ${llm?.state === "ready" ? "good" : "warn"}`}>
-                        {llm?.state ?? "—"}
-                        {llm?.error ? ` · ${llm.error}` : ""}
-                    </span>
-                </div>
             </article>
 
             <article className="card">

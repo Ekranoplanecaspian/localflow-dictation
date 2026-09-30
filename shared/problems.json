@@ -107,6 +107,16 @@
       "bar": "Warming up — try again in a moment"
     },
     {
+      "code": "speech-downloading",
+      "part": "speech",
+      "level": "info",
+      "source": "shell",
+      "detect": "The hotkey was pressed while the speech model was still downloading, on a first run or after its files were removed.",
+      "title": "The speech model is still downloading",
+      "message": "Dictation starts as soon as it is here: {progress}.",
+      "bar": "Still downloading the speech model — {progress}"
+    },
+    {
       "code": "speech-download-failed",
       "part": "speech",
       "level": "failed",

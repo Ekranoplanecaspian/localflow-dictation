@@ -71,6 +71,11 @@ export const SAMPLE: HubData = {
                     recommended: true,
                     speed: 5,
                     accuracy: 5,
+                    fit: { rating: "good", why: "quick on the graphics card (0.04 s per second of speech, estimated)" },
+                    rated_on: "cuda",
+                    disk_gb: 2.43,
+                    removable: false,
+                    download: null,
                 },
                 {
                     key: "parakeet-v2",
@@ -83,6 +88,11 @@ export const SAMPLE: HubData = {
                     recommended: false,
                     speed: 5,
                     accuracy: 4,
+                    fit: { rating: "good", why: "quick on the graphics card (0.05 s per second of speech, estimated)" },
+                    rated_on: "cuda",
+                    disk_gb: 0,
+                    removable: false,
+                    download: "d2",
                 },
                 {
                     key: "parakeet-v3-compact",
@@ -95,6 +105,11 @@ export const SAMPLE: HubData = {
                     recommended: false,
                     speed: 1,
                     accuracy: 3,
+                    fit: { rating: "good", why: "quick on the processor (0.06 s per second of speech, estimated)" },
+                    rated_on: "cpu",
+                    disk_gb: 0.64,
+                    removable: true,
+                    download: null,
                 },
                 {
                     key: "whisper-turbo",
@@ -102,11 +117,16 @@ export const SAMPLE: HubData = {
                     blurb: "OpenAI's model, for 99 languages. About half the speed of Parakeet on a graphics card, and far too slow without one.",
                     languages: 99,
                     size_gb: 1.6,
-                    installed: true,
+                    installed: false,
                     current: false,
                     recommended: false,
                     speed: 3,
                     accuracy: 4,
+                    fit: { rating: "good", why: "quick on the graphics card (0.09 s per second of speech, estimated)" },
+                    rated_on: "cuda",
+                    disk_gb: 0,
+                    removable: false,
+                    download: null,
                 },
             ],
         },
@@ -128,6 +148,11 @@ export const SAMPLE: HubData = {
                     recommended: true,
                     speed: 3,
                     accuracy: 5,
+                    fit: { rating: "good", why: "quick on the graphics card (0.4 s per clean-up, measured)" },
+                    rated_on: "cuda",
+                    disk_gb: 2.5,
+                    removable: false,
+                    download: null,
                 },
                 {
                     key: "phi-4-mini",
@@ -139,20 +164,39 @@ export const SAMPLE: HubData = {
                     recommended: false,
                     speed: 5,
                     accuracy: 4,
+                    fit: { rating: "good", why: "quick on the graphics card (0.2 s per clean-up, estimated)" },
+                    rated_on: "cuda",
+                    disk_gb: 2.49,
+                    removable: true,
+                    download: null,
                 },
                 {
                     key: "gemma-4-e2b",
                     label: "Gemma 4 E2B",
                     blurb: "Fast, and good at command-mode rewrites. Sometimes leaves numbers spelled out (\"two point four million\"), and the largest download.",
                     size_gb: 3.4,
-                    installed: true,
+                    installed: false,
                     current: false,
                     recommended: false,
                     speed: 5,
                     accuracy: 3,
+                    fit: { rating: "slow", why: "1.7 s per clean-up on the processor, estimated" },
+                    rated_on: "cpu",
+                    disk_gb: 0,
+                    removable: false,
+                    download: "d3",
                 },
             ],
         },
+        downloads: [
+            { id: "d2", kind: "speech", key: "parakeet-v2", label: "Parakeet v2", state: "downloading", reason: "switch",
+              cancellable: true, done: 1_050_000_000, total: 2_500_000_000, progress: 0.42, speed_bps: 12_400_000, eta_s: 117, error: null },
+            { id: "d3", kind: "cleanup", key: "gemma-4-e2b", label: "Gemma 4 E2B", state: "queued", reason: "library",
+              cancellable: true, done: 0, total: 3_400_000_000, progress: 0, speed_bps: 0, eta_s: null, error: null },
+            { id: "d1", kind: "runtime", key: "cuda", label: "Clean-up runtime (llama.cpp)", state: "done", reason: "automatic",
+              cancellable: false, done: 610_000_000, total: 610_000_000, progress: 1, speed_bps: 0, eta_s: null, error: null,
+              ended_s_ago: 8 },
+        ],
         // warm, with clean-up already moved off the GPU: the state with the most to lay out
         compute: {
             mode: "adaptive",
@@ -293,10 +337,25 @@ export const SAMPLE: HubData = {
 /** `#hub?demo=1&health=gpuprep`: an NVIDIA PC's first run, speech's CUDA libraries downloading. */
 export function gettingReady(): HubData {
     const compute = SAMPLE.engine?.compute;
+    const llm = SAMPLE.engine?.llm;
     return {
         ...SAMPLE,
         engine: {
             ...SAMPLE.engine,
+            // a first run: clean-up's model is downloading, the CUDA libraries wait their turn
+            llm: llm && {
+                ...llm,
+                state: "loading",
+                download: { id: "d5", label: "Qwen3 4B", progress: 0.36, size_gb: 2.5, state: "downloading" },
+            },
+            downloads: [
+                { id: "d5", kind: "cleanup", key: "qwen3-4b", label: "Qwen3 4B", state: "downloading", reason: "first-run",
+                  cancellable: true, done: 900_000_000, total: 2_500_000_000, progress: 0.36, speed_bps: 18_200_000,
+                  eta_s: 88, error: null, ended_s_ago: null },
+                { id: "d6", kind: "gpu-libs", key: "cuda", label: "Graphics card libraries (NVIDIA CUDA)", state: "queued",
+                  reason: "automatic", cancellable: false, done: 0, total: 1_071_985_899, progress: 0, speed_bps: 0,
+                  eta_s: null, error: null, ended_s_ago: null },
+            ],
             compute: compute && {
                 ...compute,
                 level: "full",
@@ -306,6 +365,52 @@ export function gettingReady(): HubData {
                 recent: [],
                 cuda_libs: { state: "downloading", done: 356_515_840, total: 1_071_985_899 },
             },
+        },
+    };
+}
+
+/** `#onboarding?demo=1&first=1`: a PC's first minutes - speech downloading, clean-up not yet here (M5). */
+export function firstRun(): HubData {
+    const e = SAMPLE.engine;
+    return {
+        ...SAMPLE,
+        settings: { ...SAMPLE.settings, onboarded: false },
+        engine: e && {
+            ...e,
+            stt: e.stt && {
+                ...e.stt,
+                state: "loading",
+                switch: null,
+                download: { id: "d1", label: "Parakeet v3", progress: 0.31, size_gb: 2.6, state: "downloading" },
+            },
+            llm: e.llm && {
+                ...e.llm,
+                state: "loading",
+                choices: e.llm.choices?.map((c) => (c.key === "qwen3-4b" ? { ...c, installed: false } : c)),
+            },
+            downloads: [
+                { id: "d1", kind: "speech", key: "parakeet-v3", label: "Parakeet v3", state: "downloading", reason: "first-run",
+                  cancellable: false, done: 806_000_000, total: 2_600_000_000, progress: 0.31, speed_bps: 16_300_000,
+                  eta_s: 110, error: null, ended_s_ago: null },
+            ],
+            recommended: [],
+        },
+    };
+}
+
+/** `#hub?demo=1&recs=1`: the sample with things to recommend (M4). */
+export function withRecommendations(data: HubData): HubData {
+    return {
+        ...data,
+        engine: data.engine && {
+            ...data.engine,
+            recommended: [
+                { kind: "speech", key: "whisper-turbo", label: "Whisper Large v3 Turbo", size_gb: 1.6, installed: false,
+                  action: "download",
+                  why: "Your language is set to \"hi\", which Parakeet does not know: Whisper turns it into text." },
+                { kind: "cleanup", key: "phi-4-mini", label: "Phi-4 mini", size_gb: 2.5, installed: false, action: "use",
+                  why: "Quick on this PC, where Qwen3 4B is slow (2.1 s per clean-up on the processor, measured)." },
+            ],
         },
     };
 }

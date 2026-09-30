@@ -2,8 +2,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { pretty, useChordCapture } from "../hub/useChordCapture";
-import type { HubData, Settings } from "../hub/types";
+import { formatEta, formatSize } from "../hub/downloads";
+import { Progress } from "../hub/ModelPicker";
+import type { Download, HubData, Settings } from "../hub/types";
 import "./Onboarding.css";
+
+type Engine = NonNullable<HubData["engine"]>;
+
+/** What a first run still has to download, most urgent first: [label, GB, how far, running]. */
+function stillToCome(engine: Engine | null | undefined): { label: string; gb: number; job?: Download }[] {
+    if (!engine) return [];
+    const jobs = (engine.downloads ?? []).filter((d) => d.state === "downloading" || d.state === "queued");
+    const out: { label: string; gb: number; job?: Download }[] = jobs.map((job) => ({
+        label: job.label,
+        gb: job.total / 1e9,
+        job,
+    }));
+    // Clean-up's model is queued only once speech has loaded; say it is coming before that.
+    const llm = engine.llm;
+    const chosen = llm?.choices?.find((c) => c.key === llm.model);
+    if (llm?.enabled && chosen && !chosen.installed && !jobs.some((j) => j.key === chosen.key)) {
+        out.push({ label: chosen.label, gb: chosen.size_gb });
+    }
+    return out;
+}
 
 /**
  * The first run.
@@ -73,6 +95,10 @@ export default function Onboarding({ data, onDone }: Props) {
     const [said, setSaid] = useState("");
     const [busy, setBusy] = useState(false);
     const box = useRef<HTMLTextAreaElement>(null);
+    // The engine's own status, as it arrives: a first run's downloads move while the wizard is up.
+    const [engine, setEngine] = useState<Engine | null>(data?.engine ?? null);
+    useEffect(() => setEngine(data?.engine ?? null), [data?.engine]);
+    useEffect(() => subscribe<Engine>("engine-status", (e) => setEngine(e)), []);
 
     useEffect(() => {
         if (data?.settings) setSettings((s) => s ?? data.settings);
@@ -108,6 +134,11 @@ export default function Onboarding({ data, onDone }: Props) {
     const finish = async () => {
         setBusy(true);
         try {
+            // Setup ended - finished, or skipped - before speech is ready: one notification
+            // when it is, so nobody has to keep trying the hotkey to find out (M5).
+            if (!ready) {
+                await invoke("notify_when_ready", { chord: hotkey.map(pretty).join(" + ") }).catch(() => {});
+            }
             await invoke("set_autostart", { on: autostart }).catch(() => {});
             await patch({ onboarded: true });
         } finally {
@@ -118,7 +149,11 @@ export default function Onboarding({ data, onDone }: Props) {
 
     const hotkey = settings?.hotkey ?? ["ctrl", "win"];
     const chord = (capture.armed ? capture.held : hotkey).map(pretty).join(" + ");
-    const ready = data?.engine?.stt?.state === "ready" && data?.link.link === "ready";
+    const ready = engine?.stt?.state === "ready" && data?.link.link === "ready";
+    const coming = stillToCome(engine);
+    const speechDownload = engine?.stt?.state !== "ready" ? engine?.stt?.download ?? null : null;
+    const speechJob = engine?.downloads?.find((d) => d.id === speechDownload?.id);
+    const cleanupComing = engine?.llm?.enabled && engine.llm.state !== "ready";
     const next = () => setStep((s) => Math.min(STEPS.length - 1, s + 1));
     const back = () => setStep((s) => Math.max(0, s - 1));
 
@@ -153,6 +188,25 @@ export default function Onboarding({ data, onDone }: Props) {
                                 </li>
                             </ul>
                             <p className="note">Three questions and a test. About a minute.</p>
+                            {coming.length > 0 && (
+                                <div className="downloads-ahead">
+                                    <b>
+                                        LocalFlow is downloading its models now, once:{" "}
+                                        {formatSize(coming.reduce((sum, c) => sum + c.gb, 0))} in all.
+                                    </b>
+                                    <ul>
+                                        {coming.map((c) => (
+                                            <li key={c.label}>
+                                                {c.label} · {formatSize(c.gb)}
+                                                {c.job?.state === "downloading"
+                                                    ? ` · ${Math.floor(c.job.progress * 100)}%`
+                                                    : " · next"}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                    <span>They carry on while you set up, and after.</span>
+                                </div>
+                            )}
                         </>
                     )}
 
@@ -220,8 +274,39 @@ export default function Onboarding({ data, onDone }: Props) {
                                     ? "That worked."
                                     : ready
                                       ? "Ready when you are."
-                                      : "Warming up the model — give it a few seconds."}
+                                      : speechDownload
+                                        ? `The speech model is still downloading: ${speechDownload.label}, ${formatSize(speechDownload.size_gb)}.`
+                                        : engine?.stt?.state === "error"
+                                          ? `The speech model isn't here yet: ${engine.stt.error ?? "it did not load"} LocalFlow keeps trying by itself.`
+                                          : "Loading the speech model — a few seconds."}
                             </p>
+                            {!ready && speechDownload && (
+                                <div className="waiting">
+                                    <Progress
+                                        value={speechDownload.state === "queued" ? null : speechDownload.progress}
+                                        text={
+                                            speechDownload.state === "queued"
+                                                ? "Waiting to start"
+                                                : [`${Math.floor(speechDownload.progress * 100)}%`, formatEta(speechJob?.eta_s)]
+                                                      .filter(Boolean)
+                                                      .join(" · ")
+                                        }
+                                    />
+                                    <span>
+                                        This turns ready by itself the moment it is here. Or finish now,
+                                        and LocalFlow tells you when you can dictate.
+                                    </span>
+                                    <button className="ghost" onClick={() => void finish()} disabled={busy}>
+                                        Finish — tell me when it&apos;s ready
+                                    </button>
+                                </div>
+                            )}
+                            {ready && !said && cleanupComing && (
+                                <p className="note">
+                                    Auto-edits are still on their way, so this first try is typed without
+                                    the tidy-up.
+                                </p>
+                            )}
                         </>
                     )}
 

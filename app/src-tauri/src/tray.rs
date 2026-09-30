@@ -53,9 +53,13 @@ impl State {
 }
 
 const SIZE: u32 = 32;
+/// The part of the ring a download has not reached yet, as a share of full strength.
+const RING_TO_GO: f32 = 0.28;
 
-/// A ring with a filled centre, drawn with 4x supersampling so the edges are smooth.
-fn icon(state: State) -> Image<'static> {
+/// A ring with a filled centre, drawn with 4x supersampling so the edges are smooth. While a
+/// download runs, `progress` (0-1) fills the ring clockwise from the top and the rest is faint:
+/// the icon itself says how far it has got (M3).
+fn icon(state: State, progress: Option<f64>) -> Image<'static> {
     let [r, g, b] = state.colour();
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
     let c = SIZE as f32 / 2.0 - 0.5;
@@ -70,8 +74,17 @@ fn icon(state: State) -> Image<'static> {
                     let px = x as f32 + (sx as f32 + 0.5) / 4.0 - 0.5;
                     let py = y as f32 + (sy as f32 + 0.5) / 4.0 - 0.5;
                     let d = ((px - c).powi(2) + (py - c).powi(2)).sqrt();
-                    if (d <= outer && d >= inner) || d <= dot {
+                    if d <= dot {
                         cover += 1.0;
+                    } else if d <= outer && d >= inner {
+                        cover += match progress {
+                            Some(p) => {
+                                // clockwise from twelve o'clock, 0-1
+                                let turn = ((px - c).atan2(c - py) / std::f32::consts::TAU).rem_euclid(1.0);
+                                if turn <= p as f32 { 1.0 } else { RING_TO_GO }
+                            }
+                            None => 1.0,
+                        };
                     }
                 }
             }
@@ -90,6 +103,8 @@ pub struct Tray<R: Runtime> {
     state: Mutex<State>,
     /// The one-line explanation shown under the state in the tooltip.
     detail: Mutex<String>,
+    /// The download running or waiting, shown in the ring and the tooltip (M3).
+    download: Mutex<Option<crate::downloads::Showing>>,
     /// "Restart engine", which reads "Leave safe mode" while the engine is in safe mode.
     restart: MenuItem<R>,
 }
@@ -124,7 +139,7 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
 
     TrayIconBuilder::with_id("localflow")
-        .icon(icon(State::Loading))
+        .icon(icon(State::Loading, None))
         .tooltip(State::Loading.label())
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -154,7 +169,12 @@ pub fn create<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         })
         .build(app)?;
 
-    app.manage(Tray { state: Mutex::new(State::Loading), detail: Mutex::new(String::new()), restart: restart_item });
+    app.manage(Tray {
+        state: Mutex::new(State::Loading),
+        detail: Mutex::new(String::new()),
+        download: Mutex::new(None),
+        restart: restart_item,
+    });
     Ok(())
 }
 
@@ -180,13 +200,66 @@ pub fn set_state<R: Runtime>(app: &AppHandle<R>, state: State, detail: Option<&s
             return;
         }
     }
+    redraw(app);
+}
+
+/// The download to show in the ring and the tooltip, or None once there is none. Redrawn only
+/// when the percentage or the words change: a download reports four times a second.
+pub fn set_download<R: Runtime>(app: &AppHandle<R>, showing: Option<crate::downloads::Showing>) {
+    let Some(tray) = app.try_state::<Tray<R>>() else { return };
+    let mut current = tray.download.locked();
+    let pct = |s: &Option<crate::downloads::Showing>| s.as_ref().map(|s| (s.progress.map(|p| (p * 100.0) as u32), s.tooltip()));
+    if pct(&current) == pct(&showing) {
+        return;
+    }
+    *current = showing;
+    drop(current);
+    redraw(app);
+}
+
+fn redraw<R: Runtime>(app: &AppHandle<R>) {
+    let Some(tray) = app.try_state::<Tray<R>>() else { return };
+    let state = *tray.state.locked();
+    let detail = tray.detail.locked().clone();
+    let download = tray.download.locked().clone();
     if let Some(icon_handle) = app.tray_by_id("localflow") {
-        let _ = icon_handle.set_icon(Some(icon(state)));
-        let tip = match detail {
-            Some(d) if !d.is_empty() => format!("{}\n{}", state.label(), d),
-            _ => state.label().to_owned(),
-        };
+        // A queued download shows an empty ring; a running one, how far it has got.
+        let progress = download.as_ref().map(|d| d.progress.unwrap_or(0.0));
+        let _ = icon_handle.set_icon(Some(icon(state, progress)));
+        let mut tip = state.label().to_owned();
+        if !detail.is_empty() {
+            tip = format!("{tip}\n{detail}");
+        }
+        if let Some(d) = download {
+            // The download first: it is what changes, and Windows cuts a tooltip at 127 characters.
+            tip = format!("{}\n{tip}", d.tooltip());
+        }
+        let tip: String = tip.chars().take(127).collect();
         let _ = icon_handle.set_tooltip(Some(&tip));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn alpha(img: &Image<'_>, x: u32, y: u32) -> u8 {
+        img.rgba()[((y * SIZE + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn a_download_fills_the_ring_clockwise_from_the_top() {
+        // the ring's middle, at three and at nine o'clock; the centre dot
+        let (right, left, mid) = ((SIZE as f32 * 0.88) as u32, (SIZE as f32 * 0.12) as u32, SIZE / 2);
+        let plain = icon(State::Idle, None);
+        assert!(alpha(&plain, right, mid) > 200 && alpha(&plain, left, mid) > 200);
+        let half = icon(State::Idle, Some(0.5));
+        assert!(alpha(&half, right, mid) > 200, "a quarter turn is within half");
+        let faint = alpha(&half, left, mid);
+        assert!(faint > 40 && faint < 110, "three quarters is not: faint, not gone ({faint})");
+        assert!(alpha(&half, mid, mid) > 200, "the centre dot stays whole");
+        let none = icon(State::Idle, Some(0.0));
+        assert!(alpha(&none, right, mid) < 110, "a queued download: an empty ring");
     }
 }
 

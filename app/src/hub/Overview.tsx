@@ -1,3 +1,4 @@
+import { ModelsIntro } from "./Recommended";
 import { StatusCard, type Go } from "./Status";
 import type { Phase, SectionProps } from "./types";
 
@@ -51,6 +52,8 @@ export function Overview({
             </header>
 
             <StatusCard health={data.health} link={link} go={go} say={say} onChange={onChange} />
+
+            <ModelsIntro data={data} say={say} go={() => go("models")} />
 
             <section className={`live ${phase}`}>
                 {phase === "recording" && <span className="live-text">{partial || "Listening…"}</span>}

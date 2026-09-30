@@ -26,6 +26,32 @@ def test_bench_subcommands_parse():
     assert p.parse_args(["bench", "fetch", "--n", "10"]).n == 10
 
 
+def test_the_speech_worker_preloads_only_a_model_already_on_this_pc(monkeypatch):
+    """A worker told to load a model that is not here downloads it itself, beside the engine's
+    own download: on a real first run Parakeet v3 came down twice and was kept twice."""
+    from localflow import cli
+    from localflow.config import Config
+    from localflow.stt import catalogue, remote
+
+    asked = []
+    monkeypatch.setattr(remote, "prestart", lambda cfg=None: asked.append(cfg))
+    monkeypatch.setattr(catalogue, "is_installed", lambda m, d: False)
+    cli.prestart_speech(Config())
+    assert asked == [None], "the worker still starts early, but loads nothing"
+    monkeypatch.setattr(catalogue, "is_installed", lambda m, d: True)
+    cli.prestart_speech(Config())
+    assert asked[-1] is not None and asked[-1].model == Config().stt.model
+    cpu = Config()
+    cpu.stt.device = "cpu"
+    cli.prestart_speech(cpu)
+    assert len(asked) == 2, "speech on the processor needs no worker"
+
+
+def test_the_fetch_subcommand_parses():
+    a = build_parser().parse_args(["fetch", "speech", "parakeet-v3", "cuda"])
+    assert (a.cmd, a.kind, a.key, a.device) == ("fetch", "speech", "parakeet-v3", "cuda")
+
+
 def test_serve_and_send_wav_parse():
     p = build_parser()
     s = p.parse_args(["serve", "--port", "7788", "--token", "dev", "--handshake"])

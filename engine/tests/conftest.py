@@ -78,6 +78,9 @@ def _speech_in_process():
     Session-wide, so module-scoped engine fixtures (set up before any per-test one) see it too."""
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCALFLOW_SPEECH_IN_PROCESS", "1")
+        # and downloads in the calling thread, where the functions tests replace are the ones
+        # that run (fetch.py; test_fetch.py covers the child process)
+        mp.setenv("LOCALFLOW_FETCH_IN_PROCESS", "1")
         yield
 
 

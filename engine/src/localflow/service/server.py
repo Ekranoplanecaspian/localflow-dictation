@@ -388,6 +388,22 @@ class EngineServer:
                     client.emit(P.error(problems.UNKNOWN_MESSAGE, f"self-check failed: {e}"))
 
             threading.Thread(target=check, name="selfcheck", daemon=True).start()
+        elif t in (P.MODELS_DOWNLOAD, P.MODELS_CANCEL, P.MODELS_REMOVE):
+            def act() -> None:
+                # Off the connection's loop: removing a model deletes gigabytes.
+                try:
+                    if t == P.MODELS_DOWNLOAD:
+                        self.engine.download_model(msg["kind"], msg["key"])
+                    elif t == P.MODELS_CANCEL:
+                        if not self.engine.cancel_download(msg["id"]):
+                            raise ValueError("that download cannot be stopped, or has already finished")
+                    else:
+                        self.engine.remove_model(msg["kind"], msg["key"])
+                except Exception as e:
+                    client.emit(P.error(problems.SETTING_REFUSED, f"{problems.detail(e)}"))
+                client.emit(self.engine.status())
+
+            threading.Thread(target=act, name="models", daemon=True).start()
         elif t == P.STATUS_GET:
             client.emit(self.engine.status())
         elif t == P.SETTINGS_RESET:
