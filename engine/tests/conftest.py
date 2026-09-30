@@ -96,4 +96,7 @@ def _no_first_run_download():
         eng.Engine._real_fetch_speech = eng.Engine._fetch_speech
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(eng.Engine, "_fetch_speech", lambda self: None)
+        # nor llama.cpp for clean-up: on a CI runner the tests that fake the clean-up server
+        # downloaded the real runtime from GitHub, and timed out when that was slow
+        mp.setattr(eng.Engine, "_fetch_cleanup_runtime", lambda self, where: None)
         yield
