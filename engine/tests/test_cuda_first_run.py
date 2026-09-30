@@ -50,6 +50,10 @@ def first_run(engine, monkeypatch):  # noqa: F811
 
     monkeypatch.setattr(cudalibs, "available", lambda: state["installed"])
     monkeypatch.setattr(cudalibs, "ensure", ensure)
+    # the engine as it ships, with onnxruntime-gpu, whether or not this virtualenv has it
+    import onnxruntime as ort
+
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
     monkeypatch.setattr(eng, "RETRY_FIRST_S", 0.1)
     report = hwinfo.Report(cpu=hwinfo.Cpu("x", 8, 16, None), ram_gb=32.0,
                            gpus=(hwinfo.Gpu("NVIDIA GeForce RTX 4060 Laptop GPU", "nvidia", 8188, 16000, False),))

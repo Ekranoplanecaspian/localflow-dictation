@@ -1,7 +1,9 @@
 """The CUDA libraries an NVIDIA PC downloads on first run (B2). Nothing here goes online: the
 wheels are made up on the spot."""
 
+import importlib
 import re
+import sys
 import zipfile
 
 import pytest
@@ -79,16 +81,26 @@ def test_a_wheel_already_downloaded_is_not_fetched_again(fake_wheels):
     assert fake_wheels == ["b.whl"]
 
 
-def test_a_virtualenv_uses_its_own_packages_unless_told_not_to(monkeypatch):
-    assert cudalibs.bundled()  # this suite runs from the development virtualenv
+def test_a_virtualenv_uses_its_own_packages_unless_told_not_to(tmp_path, monkeypatch):
+    # The `nvidia` packages as pip lays them out in a virtualenv with ".[gpu]" - made up here,
+    # so the test does not depend on this one having them (a CI runner does not).
+    (tmp_path / "nvidia" / "cu13").mkdir(parents=True)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "nvidia", raising=False)
+    importlib.invalidate_caches()
+    assert cudalibs.bundled()
     monkeypatch.setenv(cudalibs.FROM_DOWNLOAD_ENV, "1")
     assert not cudalibs.bundled()
 
 
 def test_without_the_libraries_speech_says_why_it_is_on_the_processor(monkeypatch):
+    import onnxruntime as ort
+
     import localflow.stt.parakeet as parakeet
 
     monkeypatch.setattr(parakeet, "_cuda_probe", None)
+    # the engine as it ships: onnxruntime-gpu, whether or not this virtualenv has it
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
     monkeypatch.setattr(cudalibs, "available", lambda: False)
     ok, reason = parakeet.cuda_available()
     assert not ok and reason == "the graphics card libraries are not downloaded yet"

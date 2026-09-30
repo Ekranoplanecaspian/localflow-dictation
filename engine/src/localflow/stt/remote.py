@@ -137,6 +137,12 @@ class Worker:
             self.proc.wait(3)
         except Exception:
             self.proc.kill()
+            # Ended, not just told to end: a busy worker (still loading its model) that was
+            # killed went on holding its memory and files for a moment after close() returned.
+            try:
+                self.proc.wait(5)
+            except Exception:
+                pass
 
 
 _spare: Worker | None = None

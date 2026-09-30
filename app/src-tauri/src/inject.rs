@@ -131,7 +131,32 @@ mod tests {
     #[test]
     fn this_process_does_not_block_its_own_keystrokes() {
         assert!(!crate::win::keystrokes_blocked(0));
-        assert!(!crate::win::process_elevated_for_tests(std::process::id()).unwrap_or(false));
+        // Asked by process id, this process's elevation is what its own token says: a normal
+        // run is not taken for an elevated one. Not simply "not elevated": a CI runner is an
+        // administrator.
+        assert_eq!(crate::win::process_elevated_for_tests(std::process::id()), Some(own_token_elevated()));
+    }
+
+    fn own_token_elevated() -> bool {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+            let mut token = HANDLE::default();
+            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).expect("own token");
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut len = 0u32;
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut elevation as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+            .expect("token elevation");
+            let _ = CloseHandle(token);
+            elevation.TokenIsElevated != 0
+        }
     }
 
     /// Typing is only trusted for text short enough to survive the controls that mangle it.

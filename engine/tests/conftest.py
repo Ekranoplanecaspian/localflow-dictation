@@ -30,6 +30,22 @@ def _roomy_machine(monkeypatch):
     # and an NVIDIA card, only: which graphics this machine has must not change placement either
     monkeypatch.setattr(hwinfo, "graphics_adapters", lambda: (
         hwinfo.Gpu("NVIDIA GeForce RTX 4060 Laptop GPU", "nvidia", 8188, 16000, integrated=False),))
+    # and the development machine's 12 cores: model choice estimates speed from them, and a
+    # 2-core CI runner otherwise finds nothing quick enough on its processor.
+    # test_hwinfo.py puts the real one back where it is the subject.
+    if not hasattr(hwinfo, "_real_physical_cores"):
+        hwinfo._real_physical_cores = hwinfo.physical_cores
+    monkeypatch.setattr(hwinfo, "physical_cores", lambda: 12)
+
+
+@pytest.fixture(autouse=True)
+def _cuda_ready(monkeypatch):
+    """Speech's CUDA libraries are here, as on the development machine, whether or not this one
+    has them (a CI runner has neither them nor onnxruntime-gpu): placement must not depend on
+    it. Tests about the libraries' first download set their own."""
+    from localflow import cudalibs
+
+    monkeypatch.setattr(cudalibs, "available", lambda: True)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -65,12 +81,16 @@ def _speech_in_process():
         yield
 
 
-@pytest.fixture(autouse=True)
-def _no_first_run_download(monkeypatch):
+@pytest.fixture(autouse=True, scope="session")
+def _no_first_run_download():
     """An engine started by a test never downloads a model because this machine lacks it (a CI
-    runner lacks them all). test_net.py puts the real one back where it is the subject."""
+    runner lacks them all). test_net.py puts the real one back where it is the subject.
+    Session-wide: test_connection's engine is built once per module, before any per-test
+    fixture, and on a CI runner it sat downloading the 2.6 GB speech model until it timed out."""
     import localflow.service.engine as eng
 
     if not hasattr(eng.Engine, "_real_fetch_speech"):
         eng.Engine._real_fetch_speech = eng.Engine._fetch_speech
-    monkeypatch.setattr(eng.Engine, "_fetch_speech", lambda self: None)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(eng.Engine, "_fetch_speech", lambda self: None)
+        yield

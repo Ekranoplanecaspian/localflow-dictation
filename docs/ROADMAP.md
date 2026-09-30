@@ -538,6 +538,17 @@ and a later rename changes the display name only, never the folders)
       running from the install folder or %LOCALAPPDATA%\LocalFlow. Found, for later: Tauri's own
       "is it running" check still stops any `app.exe` of the current user by name - give the
       binary its own name (`mainBinaryName`) in 0.3, with the Run key and shortcuts moved over
+- [x] D12 CI green (GitHub Actions, both repos; red since mid-September). Fixed 2026-09-30: the
+      engine tests set what they assumed of the development PC (CUDA libraries, 12 cores,
+      onnxruntime-gpu, no first-run download for the module-wide engine); CI gives cargo check a
+      stand-in engine folder, keeps Hugging Face downloads as plain files and fetches the speech
+      model once before the tests; the elevation test holds on an administrator's runner. Fixed
+      on the way: a finished first download showed at 100 % beside "ready"; closing a busy
+      speech worker returned before it had ended. Found, for later:
+      onnxruntime 1.30 refuses a model whose external data is a symlink out of its folder, which
+      is how huggingface_hub stores downloads for an administrator or with Developer Mode on.
+      v0.2.0 ships 1.29 and is fine; before moving to 1.30 the engine should download with
+      `HF_HUB_DISABLE_SYMLINKS` (and repair an existing symlinked cache)
 
 **E. Fails well** (details and the edge-case list: [PRODUCTION.md](PRODUCTION.md))
 - [x] E1 Status model: each part ok/degraded/failed + reason + action, shown in flow bar, tray,

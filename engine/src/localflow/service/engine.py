@@ -460,6 +460,9 @@ class Engine:
             t0 = time.perf_counter()
             self.vad = SileroVad()
             self._fetch_speech()
+            # Done downloading: "ready" below must not go out beside a download at 100 %, which
+            # stayed in the status until the warm-up decode had finished too.
+            self.first_download = None
             self.stt = self._build_stt(self._speech_cfg())
             # Ready before the warm-up decode, not after: this job still holds the speech
             # worker, so a take started meanwhile has its first decode wait for the warm-up,

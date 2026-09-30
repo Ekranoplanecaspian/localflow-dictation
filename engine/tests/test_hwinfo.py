@@ -69,7 +69,8 @@ def test_hardware_carries_the_report():
 
 
 @pytest.mark.skipif(os.name != "nt", reason="reads Windows")
-def test_detect_on_this_machine():
+def test_detect_on_this_machine(monkeypatch):
+    monkeypatch.setattr(hwinfo, "physical_cores", hwinfo._real_physical_cores)  # conftest pins 12
     report = hwinfo.detect()
     assert report.cpu.cores >= 1 and report.cpu.threads >= report.cpu.cores
     assert report.ram_gb > 1

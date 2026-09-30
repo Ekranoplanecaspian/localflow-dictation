@@ -9,6 +9,11 @@ jobs:
   engine:
     name: engine (pytest)
     runs-on: windows-latest
+    env:
+      # The runner is an administrator, so huggingface_hub keeps downloads as symlinks into its
+      # blob store - and onnxruntime 1.30 refuses a model whose external data file leads out of
+      # the model's folder. A user's PC (no Developer Mode) gets plain copies; so does CI.
+      HF_HUB_DISABLE_SYMLINKS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,6 +23,11 @@ jobs:
           cache-dependency-path: engine/pyproject.toml
       - name: Install engine
         run: python -m pip install -e "./engine[dev]"
+      # test_remote.py runs a real speech model. Left to the tests, several worker processes
+      # fetched it at once into an empty cache, and some are killed on purpose mid-way: one
+      # file came out damaged. One download, from one process, before any test starts.
+      - name: Speech model
+        run: python -c "from localflow.stt import catalogue as c; c.download(c.get('parakeet-v3'), 'cpu')"
       - name: Unit tests
         working-directory: engine
         run: python -m pytest -q
@@ -46,6 +56,11 @@ jobs:
       - name: Typecheck and build frontend
         working-directory: app
         run: npm run build
+      # tauri.conf.json bundles the frozen engine as a resource, and the build script refuses a
+      # resource that is not there. Freezing it takes PyInstaller and minutes; checking the shell
+      # needs only the folder.
+      - name: Stand-in for the frozen engine
+        run: New-Item -ItemType Directory -Force engine/dist/localflow-engine
       - name: Cargo check
         working-directory: app/src-tauri
         run: cargo check
