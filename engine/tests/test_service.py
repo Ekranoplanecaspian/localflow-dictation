@@ -205,6 +205,13 @@ def test_engine_cleans_up_the_final_text_and_prefills_mid_utterance(monkeypatch)
     speech = fixture_audio()
     for b in blocks(np.concatenate([speech, speech])):  # ~7 s, enough for a live decode + prefill
         session.feed((np.clip(b * 32767, -32768, 32767)).astype("<i2").tobytes())
+    # The audio arrives far faster than real time, so the live decode feed() queued may not
+    # have run yet; releasing now would make it bail out and nothing would be prefilled. A
+    # speaker holds the key while that decode runs, so hold it here until the prompt is warm.
+    deadline = time.monotonic() + 30
+    while not provider.prefills and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert provider.prefills, "the prompt cache was never warmed while speaking"
     session.end()
     deadline = time.monotonic() + 30
     while not session.done and time.monotonic() < deadline:
@@ -216,5 +223,5 @@ def test_engine_cleans_up_the_final_text_and_prefills_mid_utterance(monkeypatch)
     t = final[0]["timings"]
     assert final[0]["text"] == "Cleaned up." and t["used_llm"] is True
     assert t["profile"] == "chat", "the target app picked the style profile"
-    assert provider.prefills, "the prompt cache was never warmed while speaking"
+    assert session.live_decodes >= 1, "the prefill came from a live decode"
     assert t["llm_ms"] is not None and t["release_to_final_ms"] is not None
