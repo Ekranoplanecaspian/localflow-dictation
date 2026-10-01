@@ -666,6 +666,15 @@
       "message": "A command changes the text you've selected, and nothing was selected."
     },
     {
+      "code": "command-window-changed",
+      "part": "cleanup",
+      "level": "info",
+      "source": "shell",
+      "detect": "A command's selection had to be copied, and by then a different window was in front than the one the command was spoken in.",
+      "title": "Command not run: the window changed",
+      "message": "The selection is read from the window the command was spoken in. Go back to it, select the text and say the command again."
+    },
+    {
       "code": "command-nothing-said",
       "part": "cleanup",
       "level": "info",

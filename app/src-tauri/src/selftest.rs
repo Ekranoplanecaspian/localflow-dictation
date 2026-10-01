@@ -128,7 +128,7 @@ pub fn injection(forced: Option<crate::inject::Method>) -> i32 {
     std::thread::sleep(Duration::from_millis(100));
 
     let started = Instant::now();
-    let result = crate::inject::inject(&text, method, &ctx.app);
+    let result = crate::inject::inject(&text, method, &ctx.app, 0);
     let elapsed = started.elapsed();
     std::thread::sleep(Duration::from_millis(400)); // let Notepad process the input queue
 
@@ -196,7 +196,7 @@ pub fn batching_probe() -> i32 {
         std::thread::sleep(Duration::from_millis(80));
         crate::inject::set_batching(mode);
         let started = Instant::now();
-        let _ = crate::inject::inject(text, crate::inject::Method::Type, "notepad.exe");
+        let _ = crate::inject::inject(text, crate::inject::Method::Type, "notepad.exe", 0);
         let ms = started.elapsed().as_millis();
         std::thread::sleep(Duration::from_millis(300));
 
@@ -243,7 +243,7 @@ pub fn type_probe(samples: &[String]) -> i32 {
     for text in samples {
         let _ = crate::inject::chord(crate::inject::CTRL, VK_A);
         std::thread::sleep(Duration::from_millis(80));
-        let _ = crate::inject::inject(text, crate::inject::Method::Type, "notepad.exe");
+        let _ = crate::inject::inject(text, crate::inject::Method::Type, "notepad.exe", 0);
         std::thread::sleep(Duration::from_millis(300));
         let _ = crate::inject::chord(crate::inject::CTRL, VK_A);
         std::thread::sleep(Duration::from_millis(80));
@@ -307,7 +307,7 @@ pub fn hook_probe(text: &str) -> i32 {
     let sent = text.to_owned();
     let typist = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(200));
-        crate::inject::inject(&sent, crate::inject::Method::Type, "probe.exe")
+        crate::inject::inject(&sent, crate::inject::Method::Type, "probe.exe", 0)
     });
 
     let deadline = Instant::now() + Duration::from_secs(5);

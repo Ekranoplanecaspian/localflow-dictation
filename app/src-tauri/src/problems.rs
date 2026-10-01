@@ -95,6 +95,7 @@ codes! {
     PASTE_LAST_EMPTY = "paste-last-empty",
     PASSWORD_FIELD = "password-field",
     COMMAND_NO_SELECTION = "command-no-selection",
+    COMMAND_WINDOW_CHANGED = "command-window-changed",
     COMMAND_NOTHING_SAID = "command-nothing-said",
     COMMAND_SELECTION_TOO_LONG = "command-selection-too-long",
     SETTINGS_UNREADABLE = "settings-unreadable",

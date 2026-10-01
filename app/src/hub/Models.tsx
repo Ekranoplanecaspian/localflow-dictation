@@ -6,6 +6,7 @@ import { formatSize } from "./downloads";
 import { ModelPicker, Progress } from "./ModelPicker";
 import { Recommended } from "./Recommended";
 import type { ComputeStatus, HubData, ModelChoice, ModelState, PostProcess, SectionProps } from "./types";
+import { useSaved } from "./useSaved";
 
 /**
  * Where a part stands, in words, at the top of its card: off, waiting for its download (with the
@@ -83,8 +84,10 @@ const PROVIDERS = [
 
 export function Models({ data, onChange, say }: SectionProps) {
     const saved = data.engine_config?.postprocess ?? {};
-    const [draft, setDraft] = useState<PostProcess>(saved);
-    const [instructions, setInstructions] = useState(saved.custom_instructions ?? "");
+    // Followed only when the saved value really changes: the refresh used to wipe an edit in
+    // progress before its blur could save it.
+    const [draft, setDraft] = useSaved<PostProcess>(saved);
+    const [instructions, setInstructions] = useSaved(saved.custom_instructions ?? "");
     // The Hub refreshes every few seconds; a download wants smoother progress than that, so
     // the engine's own status messages are followed as they arrive.
     const [live, setLive] = useState<EngineStatus | null>(data.engine);
@@ -106,12 +109,6 @@ export function Models({ data, onChange, say }: SectionProps) {
         const un = listen<EngineStatus>("engine-status", (e) => setLive(e.payload));
         return () => void un.then((f) => f());
     }, []);
-
-    useEffect(() => {
-        const next = data.engine_config?.postprocess ?? {};
-        setDraft(next);
-        setInstructions(next.custom_instructions ?? "");
-    }, [data.engine_config]);
 
     const push = async (patch: PostProcess) => {
         setDraft({ ...draft, ...patch });

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { PostProcess, SectionProps } from "./types";
+import { useSaved } from "./useSaved";
 
 /** Key-value editor shared by exact replacements and snippets. */
 function Pairs({
@@ -77,11 +78,10 @@ function Pairs({
 
 export function Dictionary({ data, onChange, say }: SectionProps) {
     const saved = data.engine_config?.postprocess ?? {};
-    const [draft, setDraft] = useState<PostProcess>(saved);
+    // Adopts what the engine reports when it really changes, keeping an edit in progress.
+    const [draft, setDraft] = useSaved<PostProcess>(saved);
     const [term, setTerm] = useState("");
 
-    // Adopt what the engine reports whenever it changes underneath us.
-    useEffect(() => setDraft(data.engine_config?.postprocess ?? {}), [data.engine_config]);
 
     const push = async (patch: PostProcess) => {
         const next = { ...draft, ...patch };

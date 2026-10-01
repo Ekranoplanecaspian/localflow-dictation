@@ -71,6 +71,13 @@ function subscribe<T>(event: string, handler: (payload: T) => void) {
  */
 function Level({ onHeard }: { onHeard: () => void }) {
     const fill = useRef<HTMLSpanElement>(null);
+    // The shell sends levels only while dictating, unless a screen like this one asks: without
+    // this the bar stayed still however loudly the user spoke.
+    useEffect(() => {
+        if (!("__TAURI_INTERNALS__" in window)) return; // the browser demo has no microphone
+        void invoke("level_meter", { on: true }).catch(() => {});
+        return () => void invoke("level_meter", { on: false }).catch(() => {});
+    }, []);
     useEffect(
         () =>
             subscribe<{ level: number }>("level", (p) => {

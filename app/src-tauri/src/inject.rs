@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -128,6 +128,23 @@ mod tests {
         }
     }
 
+    /// Keys for a window that is not in front are not sent at all - checked right before they
+    /// go out, not only when the job started (found by an outside review of 0.2.3). The taskbar
+    /// stands in for "a window the user has since left": it is never the one being typed into.
+    #[test]
+    fn keys_for_a_window_no_longer_in_front_are_not_sent() {
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        let class: Vec<u16> = "Shell_TrayWnd".encode_utf16().chain(Some(0)).collect();
+        let Ok(taskbar) = (unsafe { FindWindowW(windows::core::PCWSTR(class.as_ptr()), None) }) else {
+            return; // no taskbar (a service session): nothing to test against
+        };
+        let left = taskbar.0 as isize;
+        assert!(!still_in_front(left));
+        assert!(still_in_front(0), "no window in particular: whatever is in front");
+        let typed = type_text("must not be typed", false, left);
+        assert_eq!(typed.map_err(|e| e.code()), Err(WINDOW_CHANGED));
+    }
+
     #[test]
     fn this_process_does_not_block_its_own_keystrokes() {
         assert!(!crate::win::keystrokes_blocked(0));
@@ -227,6 +244,36 @@ mod tests {
         result.unwrap();
     }
 
+    /// Uses the real Windows clipboard (`cargo test -- --ignored`). Something copied while a paste
+    /// was landing stays: the restore used to put the older clipboard back over it (found by an
+    /// outside review of 0.2.3).
+    #[test]
+    #[ignore]
+    fn a_restore_leaves_what_was_copied_after_the_paste() {
+        let users = clipboard_snapshot().unwrap();
+        let result = std::panic::catch_unwind(|| {
+            clipboard_set(CF_UNICODETEXT.0 as u32, &wide_bytes("the user's old clipboard")).unwrap();
+            let saved = clipboard_swap("dictated text").unwrap();
+            let ours = unsafe { GetClipboardSequenceNumber() };
+            // Another program copies during the settle time.
+            clipboard_set(CF_UNICODETEXT.0 as u32, &wide_bytes("copied just now")).unwrap();
+            saved.restore_unless_replaced(ours).unwrap();
+            assert_eq!(clipboard_text().as_deref(), Some("copied just now"));
+
+            // Nothing copied meanwhile: the old clipboard comes back as before.
+            let saved = clipboard_swap("dictated text").unwrap();
+            let ours = unsafe { GetClipboardSequenceNumber() };
+            saved.restore_unless_replaced(ours).unwrap();
+            assert_eq!(clipboard_text().as_deref(), Some("copied just now"));
+        });
+        users.restore().unwrap();
+        result.unwrap();
+    }
+
+    fn wide_bytes(text: &str) -> Vec<u8> {
+        text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()
+    }
+
     /// In a chat app a typed Enter sends the message, and in a shell it runs the line. Both
     /// are irreversible, so multi-line text goes in as one paste instead.
     #[test]
@@ -301,6 +348,17 @@ pub fn obstacle(spoken_into: isize, in_front: isize, blocked: impl Fn(isize) -> 
     None
 }
 
+/// Whether `window` (0: none in particular) is still the window in front, on this session's own
+/// desktop. Checked again right before keys go out, not only when a job starts: the waits in
+/// between (for the chord's keys to come up, for the last paste's clipboard) are long enough for
+/// the user to click somewhere else.
+pub fn still_in_front(window: isize) -> bool {
+    if window == 0 {
+        return true;
+    }
+    crate::power::on_own_desktop() && obstacle(window, crate::win::foreground_window(), |_| false).is_none()
+}
+
 /// The most recent dictation, for Paste last dictation. Only in memory, and never a password.
 static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -315,42 +373,30 @@ fn say_kept(app: &AppHandle, code: crate::problems::Code, chars: usize) {
     let _ = app.emit("notice", json!({"code": code.as_str(), "text": text, "hold_ms": 5000}));
 }
 
+/// A job whose text is not typed: say why, keep it for Win + Alt + V (never a password), and
+/// report it.
+fn keep(job: &Job, code: crate::problems::Code) {
+    let chars = job.text.chars().count();
+    if !job.private {
+        remember_last(job.text.trim_end());
+    }
+    say_kept(&job.app, code, chars);
+    let _ = job.app.emit(
+        "injected",
+        json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
+    );
+}
+
+/// The error for keys that stopped because their window was no longer in front.
+const WINDOW_CHANGED: windows::core::HRESULT = windows::core::HRESULT(0x8004_1F01u32 as i32);
+
+fn window_changed() -> windows::core::Error {
+    windows::core::Error::new(WINDOW_CHANGED, "the window changed")
+}
+
 /// Type or paste one job's text, then report how it went.
 fn run_job(job: Job) {
     let started = Instant::now();
-    if crate::e2e::typing() {
-        // On the lock screen or a UAC prompt's secure desktop, nothing of this session can take
-        // keystrokes, whatever window was in front before.
-        let in_front = if crate::power::on_own_desktop() { crate::win::foreground_window() } else { 0 };
-        if let Some(why) = obstacle(job.window, in_front, crate::win::keystrokes_blocked) {
-            let chars = job.text.chars().count();
-            match why {
-                // A password never goes on the clipboard, where every program can read it and
-                // the next Ctrl+V anywhere pastes it: the user types it themselves.
-                Obstacle::Elevated if job.private => {
-                    say_kept(&job.app, crate::problems::PASSWORD_NOT_TYPED_ADMIN, chars)
-                }
-                // Windows would drop the keystrokes, but not the user's own Ctrl+V.
-                Obstacle::Elevated => match copy_private(&job.text) {
-                    Ok(()) => say_kept(&job.app, crate::problems::TEXT_COPIED_ADMIN, chars),
-                    Err(e) => {
-                        crate::shell_log!("could not copy for an administrator app: {e}");
-                        say_kept(&job.app, crate::problems::TEXT_KEPT_NO_WINDOW, chars);
-                    }
-                },
-                Obstacle::WindowChanged => say_kept(&job.app, crate::problems::TEXT_KEPT_WINDOW_CHANGED, chars),
-                Obstacle::NoWindow => say_kept(&job.app, crate::problems::TEXT_KEPT_NO_WINDOW, chars),
-            }
-            if !job.private {
-                remember_last(job.text.trim_end());
-            }
-            let _ = job.app.emit(
-                "injected",
-                json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
-            );
-            return;
-        }
-    }
     // A password is typed: pasting would put it on the clipboard.
     let wanted = if job.private {
         Method::Type
@@ -366,29 +412,49 @@ fn run_job(job: Job) {
         return;
     }
     // Typed while Ctrl, Alt or Win is still held, every letter is a shortcut: Win + L locks the
-    // PC, Ctrl + W closes the tab. It used to be typed anyway after the wait, so as not to lose
-    // it; now it is kept for Win + Alt + V instead (a password, never kept, is said again).
+    // PC, Ctrl + W closes the tab. Kept for Win + Alt + V instead (a password, never kept, is
+    // said again). Waited for before the window is checked, not after: the user can click
+    // another window during the wait, and the check has to see that.
     if !wait_for_modifiers_released() {
-        let chars = job.text.chars().count();
-        if job.private {
-            say_kept(&job.app, crate::problems::PASSWORD_NOT_TYPED_KEYS_HELD, chars);
+        let code = if job.private {
+            crate::problems::PASSWORD_NOT_TYPED_KEYS_HELD
         } else {
-            remember_last(job.text.trim_end());
-            say_kept(&job.app, crate::problems::TEXT_KEPT_KEYS_HELD, chars);
-        }
-        let _ = job.app.emit(
-            "injected",
-            json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
-        );
-        return;
+            crate::problems::TEXT_KEPT_KEYS_HELD
+        };
+        return keep(&job, code);
+    }
+    // On the lock screen or a UAC prompt's secure desktop, nothing of this session can take
+    // keystrokes, whatever window was in front before.
+    let in_front = if crate::power::on_own_desktop() { crate::win::foreground_window() } else { 0 };
+    if let Some(why) = obstacle(job.window, in_front, crate::win::keystrokes_blocked) {
+        return match why {
+            // A password never goes on the clipboard, where every program can read it and the
+            // next Ctrl+V anywhere pastes it: the user types it themselves.
+            Obstacle::Elevated if job.private => keep(&job, crate::problems::PASSWORD_NOT_TYPED_ADMIN),
+            // Windows would drop the keystrokes, but not the user's own Ctrl+V.
+            Obstacle::Elevated => match copy_private(&job.text) {
+                Ok(()) => keep(&job, crate::problems::TEXT_COPIED_ADMIN),
+                Err(e) => {
+                    crate::shell_log!("could not copy for an administrator app: {e}");
+                    keep(&job, crate::problems::TEXT_KEPT_NO_WINDOW)
+                }
+            },
+            Obstacle::WindowChanged => keep(&job, crate::problems::TEXT_KEPT_WINDOW_CHANGED),
+            Obstacle::NoWindow => keep(&job, crate::problems::TEXT_KEPT_NO_WINDOW),
+        };
     }
     let result = match crate::e2e::may_type_now() {
-        Ok(()) => inject(&job.text, wanted, &job.target),
+        Ok(()) => inject(&job.text, wanted, &job.target, job.window),
         Err(why) => {
             crate::shell_log!("{why}");
             Err(windows::core::Error::new(windows::core::HRESULT(0x80004004u32 as i32), why))
         }
     };
+    // The window went out of front while the keys were going out (or before the paste):
+    // whatever had not reached it is not sent anywhere else, and the whole text is kept.
+    if matches!(&result, Err(e) if e.code() == WINDOW_CHANGED) {
+        return keep(&job, crate::problems::TEXT_KEPT_WINDOW_CHANGED);
+    }
     let method = *result.as_ref().unwrap_or(&wanted);
     let payload = json!({
         "method": method.name(),
@@ -401,7 +467,10 @@ fn run_job(job: Job) {
         // After the text, not before: pressing Enter first would send an empty
         // message, and pressing it too soon can beat the paste into the field.
         std::thread::sleep(Duration::from_millis(60));
-        if let Err(e) = tap_enter() {
+        if !still_in_front(job.window) {
+            // Enter is irreversible: in another window it sends or runs something else.
+            crate::shell_log!("auto-send skipped in {}: the window changed", job.target);
+        } else if let Err(e) = tap_enter() {
             crate::shell_log!("auto-send failed in {}: {e}", job.target);
         } else {
             crate::shell_log!("auto-sent in {}", job.target);
@@ -448,13 +517,14 @@ pub fn with_spacing(text: &str, trailing_space: bool) -> String {
 ///
 /// No trailing space, unlike a dictation: this is going *over* a selection rather than after
 /// the caret, and a space here would push whatever follows the selection along by one.
-pub fn deliver_replacement(app: &AppHandle, text: &str) {
+///
+/// `target` and `window` are where the command was spoken: the edit goes there or is kept, never
+/// to whichever window the newest take used.
+pub fn deliver_replacement(app: &AppHandle, text: &str, target: &str, window: isize) {
     if text.is_empty() {
         return;
     }
-    let last = crate::context::last();
-    let target = last.as_ref().map(|c| c.app.clone()).unwrap_or_default();
-    let window = last.as_ref().map(|c| c.hwnd).unwrap_or(0);
+    let target = target.to_owned();
     let rule = crate::settings::load().rule_for(&target);
     // No auto-send on a command-mode edit: the user was rewriting text in place, not composing
     // a message, and sending it would be irreversible.
@@ -558,15 +628,19 @@ fn tap_enter() -> windows::core::Result<()> {
 /// Synchronous injection. Returns the method that actually delivered the text, which is not
 /// always the one asked for: a clipboard held open by another application must not cost the
 /// user their dictation, so a failed paste is typed instead.
-pub fn inject(text: &str, method: Method, app: &str) -> windows::core::Result<Method> {
+///
+/// `window` (0: none in particular) is checked again before every batch of keys and before the
+/// paste; once it is not in front, nothing more is sent and the error is `WINDOW_CHANGED`.
+pub fn inject(text: &str, method: Method, app: &str, window: isize) -> windows::core::Result<Method> {
     wait_for_modifiers_released();
     match method {
-        Method::Type => type_text(text, is_chat_app(app)).map(|()| Method::Type),
-        Method::Paste => match paste_text(text) {
+        Method::Type => type_text(text, is_chat_app(app), window).map(|()| Method::Type),
+        Method::Paste => match paste_text(text, window) {
             Ok(()) => Ok(Method::Paste),
+            Err(e) if e.code() == WINDOW_CHANGED => Err(e),
             Err(e) => {
                 crate::shell_log!("paste failed ({e}); typing instead");
-                type_text(text, is_chat_app(app)).map(|()| Method::Type)
+                type_text(text, is_chat_app(app), window).map(|()| Method::Type)
             }
         },
     }
@@ -663,7 +737,7 @@ fn batching() -> Batching {
     }
 }
 
-fn type_text(text: &str, shift_enter: bool) -> windows::core::Result<()> {
+fn type_text(text: &str, shift_enter: bool, window: isize) -> windows::core::Result<()> {
     let mut inputs: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
     for ch in text.chars() {
         match ch {
@@ -687,34 +761,49 @@ fn type_text(text: &str, shift_enter: bool) -> windows::core::Result<()> {
             }
         }
     }
+    // Each batch goes only to the window it is for: one that left the front part-way through
+    // gets no more of it, and neither does whatever came in front instead.
+    let send_to = |batch: &[INPUT]| {
+        if !still_in_front(window) {
+            return Err(window_changed());
+        }
+        send(batch)
+    };
     match batching() {
         Batching::All => {
             for chunk in inputs.chunks(128) {
-                send(chunk)?;
+                send_to(chunk)?;
             }
         }
         Batching::PerChar => {
             for pair in inputs.chunks(2) {
-                send(pair)?;
+                send_to(pair)?;
             }
         }
         Batching::PerCharSlow => {
             for pair in inputs.chunks(2) {
-                send(pair)?;
+                send_to(pair)?;
                 std::thread::sleep(Duration::from_millis(1));
             }
         }
         Batching::PerEvent => {
             for one in inputs.chunks(1) {
-                send(one)?;
+                send_to(one)?;
             }
         }
     }
     Ok(())
 }
 
-fn paste_text(text: &str) -> windows::core::Result<()> {
+fn paste_text(text: &str, window: isize) -> windows::core::Result<()> {
+    // Waits for the last paste's clipboard to be put back first: the window is checked after.
     let previous = clipboard_swap(text)?;
+    // Which clipboard is ours: anything copied after this, the restore leaves alone.
+    let ours = unsafe { GetClipboardSequenceNumber() };
+    if !still_in_front(window) {
+        let _ = previous.restore_unless_replaced(ours);
+        return Err(window_changed());
+    }
     let mut inputs = Vec::with_capacity(4);
     inputs.push(key(VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)));
     tap(VK_V, &mut inputs);
@@ -729,7 +818,7 @@ fn paste_text(text: &str) -> windows::core::Result<()> {
     // take this dictation for the user's clipboard and restore it instead of theirs.
     let restore = std::thread::Builder::new().name("clipboard-restore".into()).spawn(move || {
         std::thread::sleep(CLIPBOARD_SETTLE);
-        let _ = previous.restore();
+        let _ = previous.restore_unless_replaced(ours);
     });
     if let Ok(handle) = restore {
         *PENDING_RESTORE.locked() = Some(handle);
@@ -902,11 +991,28 @@ impl Snapshot {
     /// Put it all back. An empty snapshot leaves the clipboard empty, as it was.
     pub fn restore(&self) -> windows::core::Result<()> {
         let _guard = ClipboardGuard::open()?;
-        unsafe {
-            EmptyClipboard()?;
-            for (format, bytes) in &self.0 {
-                let _ = set_locked(*format, bytes);
-            }
+        unsafe { self.restore_locked() }
+    }
+
+    /// Put it back unless something else has been copied since the clipboard was LocalFlow's
+    /// (`ours`, its sequence number then). A paste puts the user's clipboard back a moment
+    /// after it lands, and whatever the user or another program copied in that moment was
+    /// overwritten by the older contents. Checked with the clipboard held open, so nothing can
+    /// copy between the check and the restore.
+    pub fn restore_unless_replaced(&self, ours: u32) -> windows::core::Result<()> {
+        let _guard = ClipboardGuard::open()?;
+        if unsafe { GetClipboardSequenceNumber() } != ours {
+            crate::shell_log!("something was copied while a paste was landing; leaving it on the clipboard");
+            return Ok(());
+        }
+        unsafe { self.restore_locked() }
+    }
+
+    /// Caller must hold the clipboard open.
+    unsafe fn restore_locked(&self) -> windows::core::Result<()> {
+        EmptyClipboard()?;
+        for (format, bytes) in &self.0 {
+            let _ = set_locked(*format, bytes);
         }
         Ok(())
     }

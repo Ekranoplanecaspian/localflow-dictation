@@ -40,6 +40,18 @@ def test_dictionary_multiword_terms_and_explicit_replacements():
     assert out == "Wispr Flow is what LocalFlow replaces, says Dr Okonkwo"
 
 
+def test_dictionary_replacements_go_in_exactly_backslashes_and_all():
+    """They were used as re.sub templates: "C:\\temp" gained a tab and "C:\\projects\\notes"
+    raised (found by an outside review of 0.2.3)."""
+    d = Dictionary([], replacements={
+        "temp folder": r"C:\temp",
+        "notes folder": r"C:\projects\notes",
+        "group one": r"\1 and \g<0>",
+    })
+    out, _ = d.apply("open the temp folder, then the notes folder, then group one")
+    assert out == r"open the C:\temp, then the C:\projects\notes, then \1 and \g<0>"
+
+
 def test_profiles_by_app_and_title():
     assert profile_for("slack.exe").key == "chat"
     assert profile_for("OUTLOOK.EXE").key == "email"

@@ -351,7 +351,9 @@ class LlamaServer:
                     log.info("llama-server ready")
                     return
                 time.sleep(0.25)
-            self.stop()
+            # Still holding the lock: `stop()` would wait for it for ever. A server that never
+            # became healthy hung the engine's start-up here instead of failing it.
+            self._stop_locked()
             raise RuntimeError("llama-server did not become healthy in time")
 
     def health(self) -> bool:
@@ -366,13 +368,17 @@ class LlamaServer:
 
     def stop(self) -> None:
         with self._lock:
-            if self.proc is not None and self.proc.poll() is None:
-                try:
-                    self.proc.terminate()
-                    self.proc.wait(5)
-                except Exception:
-                    self.proc.kill()
-            self.proc = None
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
+        """End the server. The caller holds `_lock`."""
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(5)
+            except Exception:
+                self.proc.kill()
+        self.proc = None
 
     def __enter__(self):
         self.start()

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppRule, SectionProps, Settings } from "./types";
+import { useSaved } from "./useSaved";
 
 /**
  * Per-application rules.
@@ -46,8 +47,7 @@ function Toggle({ label, on, onChange }: { label: string; on: boolean; onChange:
 }
 
 export function Apps({ data, onChange, say }: SectionProps) {
-    const [settings, setSettings] = useState<Settings>(data.settings);
-    useEffect(() => setSettings(data.settings), [data.settings]);
+    const [settings, setSettings] = useSaved<Settings>(data.settings);
 
     const apps = useMemo(() => {
         const seen = new Map<string, number>();

@@ -141,3 +141,54 @@ def test_the_vulkan_build_is_pinned_and_verified():
     (asset,) = M.LLAMA_ASSETS["vulkan"]
     assert asset.name == f"llama-{M.LLAMA_BUILD}-bin-win-vulkan-x64.zip"
     assert asset.sha256 and len(asset.sha256) == 64 and asset.size
+
+
+def test_a_server_that_never_becomes_healthy_is_stopped_and_start_up_fails(tmp_path, monkeypatch):
+    """The timeout stopped the server while holding the lock `stop()` takes: start-up hung for
+    ever instead of failing (found by an outside review of 0.2.3)."""
+    import threading
+
+    from localflow.llm.server import LlamaServer
+
+    class Child:
+        returncode = None
+        terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = 1
+
+    child = Child()
+    monkeypatch.setattr(M, "BIN_DIR", tmp_path / "bin")
+    M.llama_dir("cpu").mkdir(parents=True)
+    monkeypatch.setattr(server, "ensure_binaries", lambda kind, progress=None: tmp_path / "llama-server.exe")
+    monkeypatch.setattr(server, "ensure_model", lambda key, progress=None: tmp_path / "model.gguf")
+    monkeypatch.setattr(server, "reap_orphans", lambda exe: 0)
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: child)
+    monkeypatch.setattr(server.jobobject, "assign", lambda proc, name: None)
+    monkeypatch.setattr(LlamaServer, "health", lambda self: False)
+
+    srv = LlamaServer(device="cpu")
+    outcome = {}
+
+    def run():
+        try:
+            srv.start(timeout=0)
+        except RuntimeError as e:
+            outcome["error"] = str(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "start-up hung"
+    assert "healthy" in outcome.get("error", "")
+    assert child.terminated and srv.proc is None

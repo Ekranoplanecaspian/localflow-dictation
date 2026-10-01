@@ -491,7 +491,7 @@ pub fn on_final(app: &AppHandle, msg: &Value) {
 
     // Command mode: what was just transcribed is an instruction, not something to type.
     if let Mode::Command { selection } = owed.mode {
-        start_command(app, &id, selection, text);
+        start_command(app, &id, selection, text, &owed.target, owed.spoken.window);
         return;
     }
     let t = msg.get("timings");
@@ -598,9 +598,10 @@ pub fn watch_hands_free(app: &AppHandle, id: &str, timeout: std::time::Duration)
 /// Runs on its own thread because the fallback way of reading a selection is to copy it, which
 /// means waiting for the user's fingers to leave the chord and then for the target app to
 /// answer Ctrl+C. Neither belongs on the websocket task.
-fn start_command(app: &AppHandle, id: &str, selection: Option<String>, instruction: &str) {
+fn start_command(app: &AppHandle, id: &str, selection: Option<String>, instruction: &str, target: &str, window: isize) {
     let app = app.clone();
     let id = id.to_owned();
+    let target = target.to_owned();
     let instruction = instruction.trim().to_owned();
     let selection = selection.filter(|s| !s.trim().is_empty());
     std::thread::Builder::new()
@@ -619,9 +620,13 @@ fn start_command(app: &AppHandle, id: &str, selection: Option<String>, instructi
             if instruction.is_empty() {
                 return done(crate::problems::COMMAND_NOTHING_SAID);
             }
-            // UI Automation saw it at the start; otherwise copy it now that the chord is free.
+            // UI Automation saw it at the start; otherwise copy it now that the chord is free -
+            // from the window the command was spoken in, never from one that came in front since.
             let selection = match selection {
                 Some(s) => s,
+                None if !crate::inject::still_in_front(window) => {
+                    return done(crate::problems::COMMAND_WINDOW_CHANGED)
+                }
                 None => match crate::inject::copy_selection() {
                     Some(s) => s,
                     None => return done(crate::problems::COMMAND_NO_SELECTION),
@@ -637,9 +642,30 @@ fn start_command(app: &AppHandle, id: &str, selection: Option<String>, instructi
                 instruction,
                 selection.chars().count()
             );
+            remember_command(&id, &target, window);
             app.state::<Engine>().run_command(&id, &selection, &instruction);
         })
         .ok();
+}
+
+/// Commands waiting for the engine's edit: the app and window each was spoken in, by id.
+static COMMANDS: Mutex<Vec<(String, String, isize)>> = Mutex::new(Vec::new());
+const COMMANDS_KEPT: usize = 16;
+
+fn remember_command(id: &str, target: &str, window: isize) {
+    let mut waiting = COMMANDS.locked();
+    if waiting.len() >= COMMANDS_KEPT {
+        waiting.remove(0); // its engine went away; nothing will come for it
+    }
+    waiting.push((id.to_owned(), target.to_owned(), window));
+}
+
+/// The app and window a command was spoken in, once: its edit goes there or nowhere.
+fn take_command(id: &str) -> Option<(String, isize)> {
+    let mut waiting = COMMANDS.locked();
+    let at = waiting.iter().position(|(i, _, _)| i == id)?;
+    let (_, target, window) = waiting.remove(at);
+    Some((target, window))
 }
 
 /// The engine answered a command. Only a `changed` result touches the user's document.
@@ -649,9 +675,18 @@ pub fn on_command_result(app: &AppHandle, msg: &Value) {
     let changed = msg.get("changed").and_then(Value::as_bool).unwrap_or(false);
     let text = msg.get("text").and_then(Value::as_str).unwrap_or("");
     let ms = msg.get("ms").and_then(Value::as_f64).unwrap_or(0.0);
+    // Where this command was spoken. It used to be wherever the newest take was spoken: a
+    // command's edit arriving after a dictation had started in another window replaced that
+    // window's selection instead (found by an outside review of 0.2.3).
+    let spoken_in = take_command(&id);
     if changed && !text.is_empty() {
+        let Some((target, window)) = spoken_in else {
+            crate::shell_log!("{id} command result for a command nobody is waiting for; not typed");
+            sessions.idle_unless_busy();
+            return;
+        };
         crate::shell_log!("{id} command applied in {ms:.0} ms | {text:?}");
-        crate::inject::deliver_replacement(app, text);
+        crate::inject::deliver_replacement(app, text, &target, window);
     } else {
         // The selection is left exactly as it was. This is the common outcome when the model
         // wanders off, and it must stay cheap and quiet rather than destroying the text.
@@ -685,6 +720,17 @@ pub fn on_error(app: &AppHandle, msg: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_commands_edit_goes_to_the_window_it_was_spoken_in_whatever_finishes_first() {
+        remember_command("c-a", "notepad.exe", 111);
+        remember_command("c-b", "winword.exe", 222);
+        // B's edit comes back first, then A's: each to its own window.
+        assert_eq!(take_command("c-b"), Some(("winword.exe".to_owned(), 222)));
+        assert_eq!(take_command("c-a"), Some(("notepad.exe".to_owned(), 111)));
+        assert_eq!(take_command("c-a"), None, "once only");
+        assert_eq!(take_command("c-unknown"), None, "a result nobody asked for goes nowhere");
+    }
 
     #[test]
     fn a_password_takes_words_never_reach_the_windows_however_late() {

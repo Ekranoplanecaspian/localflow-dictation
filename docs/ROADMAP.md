@@ -808,6 +808,33 @@ A review of the whole 0.2.3 codebase found ten problems; each is fixed in its ow
 - [x] Cancelling a library download no longer cancels the first run's download of the same model
 - [x] A shell.json that is not UTF-8 (or cannot be read) is set aside, not saved over
 
+## Version 0.2.5: outside review fixes (2026-10-01)
+
+An outside review of 0.2.3 listed ten defects. One
+(03, a password copied for an administrator app) was already fixed in 0.2.4, and half of 02 (text
+typed with keys still held); the rest are fixed here, one commit each, with a regression test
+where one could be written.
+
+- [x] 01 A command's edit goes to the window the command was spoken in (kept per command id),
+      or is kept; results arriving out of order each reach their own window; an unknown
+      result is not typed; a selection is copied only from that window (`command-window-changed`)
+- [x] 02 The window is checked after the wait for held keys, and again before every batch of
+      typed keys, before Ctrl+V and before auto-send's Enter; once it has left the front nothing
+      more is sent and the text is kept
+- [x] 04 A clean-up server that never becomes healthy fails start-up (it deadlocked on its own
+      lock)
+- [x] 05 Closing a speech worker that stopped answering ends it within seconds (it waited on the
+      lock the stalled call held)
+- [x] 06 Dictionary replacements go in literally: Windows paths and backslashes survive
+- [x] 07 The Hub's four-second refresh no longer wipes an edit in progress (`useSaved`, on Models,
+      Dictionary, Voice and Apps)
+- [x] 08 A paste's clipboard restore leaves anything copied in the meantime (clipboard sequence
+      number)
+- [x] 09 Setup's microphone meter moves when the user speaks (`level_meter` while the step shows)
+- [x] 10 A lone function key as the command hotkey works: saving and the hook use one rule
+- Not taken up from the review: its licence advice and the meeting-notes plan are product
+  decisions for later, not defects
+
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only
 - ~~Default clean-up model~~ - decided: Automatic, which picks Qwen3 4B on capable hardware

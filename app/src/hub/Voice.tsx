@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { pretty, useChordCapture } from "./useChordCapture";
 import type { SectionProps, Settings } from "./types";
+import { useSaved } from "./useSaved";
 
 function Toggle({
     label,
@@ -27,10 +28,9 @@ function Toggle({
 }
 
 export function Voice({ data, onChange, say }: SectionProps) {
-    const [settings, setSettings] = useState<Settings>(data.settings);
+    const [settings, setSettings] = useSaved<Settings>(data.settings);
     const [autostart, setAutostart] = useState(false);
 
-    useEffect(() => setSettings(data.settings), [data.settings]);
     const bluetooth = new Set(data.bluetooth_microphones ?? []);
     // The one chosen, or with "System default", the one the microphone status says is in use.
     const mic = data.health?.parts.find((p) => p.id === "microphone");

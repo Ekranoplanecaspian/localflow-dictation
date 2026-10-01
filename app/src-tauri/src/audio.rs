@@ -51,6 +51,9 @@ const DEVICE_CHECK_TICKS: u32 = 6;
 
 struct Shared {
     recording: AtomicBool,
+    /// Something on screen shows the microphone's level while nothing is being recorded (the
+    /// setup wizard's "Say something - the bar should move").
+    metering: AtomicBool,
     /// Set with `recording`; the first callback afterwards flushes the pre-roll.
     arm: AtomicBool,
     /// Most recent peak, as f32 bits, for the level meter.
@@ -101,6 +104,7 @@ impl Tape {
 fn new_shared() -> Arc<Shared> {
     Arc::new(Shared {
         recording: AtomicBool::new(false),
+        metering: AtomicBool::new(false),
         arm: AtomicBool::new(false),
         level: AtomicU32::new(0),
         produced: AtomicU64::new(0),
@@ -163,6 +167,7 @@ impl Capture {
     pub fn start(app: AppHandle, sessions: Arc<SessionManager>) -> Capture {
         let shared = Arc::new(Shared {
             recording: AtomicBool::new(false),
+            metering: AtomicBool::new(false),
             arm: AtomicBool::new(false),
             level: AtomicU32::new(0),
             produced: AtomicU64::new(0),
@@ -197,6 +202,12 @@ impl Capture {
     pub fn end(&self) {
         self.shared.recording.store(false, Ordering::SeqCst);
         self.shared.arm.store(false, Ordering::SeqCst);
+    }
+
+    /// Send the level meter's readings while nothing is recorded too, for a screen that asks
+    /// the user to speak and shows the microphone hearing them. Off again when it closes.
+    pub fn set_metering(&self, on: bool) {
+        self.shared.metering.store(on, Ordering::SeqCst);
     }
 
     pub fn level(&self) -> f32 {
@@ -239,10 +250,14 @@ fn meter(app: AppHandle, shared: Arc<Shared>) {
         }
         std::thread::sleep(period);
         let recording = shared.recording.load(Ordering::Relaxed);
-        if !recording && !settling {
+        // Idle, the meter is quiet: nothing shows it, and 50 events a second would be wasted.
+        // Unless a screen asked for it - setup's microphone step used to say "the bar should
+        // move" to a meter that only moved while dictating (found by an outside review of 0.2.3).
+        let wanted = recording || shared.metering.load(Ordering::Relaxed);
+        if !wanted && !settling {
             continue;
         }
-        settling = recording || smoothed > 0.001;
+        settling = wanted || smoothed > 0.001;
         let level = f32::from_bits(shared.level.load(Ordering::Relaxed));
         // Fast attack, slow release: the bar should jump on a syllable and fall smoothly.
         smoothed = if level > smoothed { level } else { smoothed * 0.82 + level * 0.18 };

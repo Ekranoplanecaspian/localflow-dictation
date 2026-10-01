@@ -38,6 +38,8 @@ log = logging.getLogger(__name__)
 
 IN_PROCESS_ENV = "LOCALFLOW_SPEECH_IN_PROCESS"  # "1": the old way, CUDA in the engine itself
 _HEADER = struct.Struct("<Q")
+#: How long `close` waits for the channel before it stops asking and ends the worker.
+QUIT_WAIT_S = 2.0
 
 
 def enabled() -> bool:
@@ -131,18 +133,29 @@ class Worker:
     def close(self) -> None:
         if self.proc.poll() is not None:
             return
-        try:
-            with self._lock:
-                _send(self.proc.stdin, ("quit", ()))
-            self.proc.wait(3)
-        except Exception:
-            self.proc.kill()
-            # Ended, not just told to end: a busy worker (still loading its model) that was
-            # killed went on holding its memory and files for a moment after close() returned.
+        # Asked to quit only if the channel comes free soon. A call waiting for a reply holds
+        # the lock for as long as the worker stays silent, and waiting for it here hung the
+        # engine's shutdown behind a stalled worker, never reaching the kill below. Killing it
+        # ends that call too: its read meets the end of the pipe.
+        if self._lock.acquire(timeout=QUIT_WAIT_S):
             try:
-                self.proc.wait(5)
+                _send(self.proc.stdin, ("quit", ()))
             except Exception:
                 pass
+            finally:
+                self._lock.release()
+            try:
+                self.proc.wait(3)
+                return
+            except Exception:
+                pass
+        self.proc.kill()
+        # Ended, not just told to end: a busy worker (still loading its model) that was
+        # killed went on holding its memory and files for a moment after close() returned.
+        try:
+            self.proc.wait(5)
+        except Exception:
+            pass
 
 
 _spare: Worker | None = None

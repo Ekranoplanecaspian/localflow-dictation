@@ -369,11 +369,13 @@ impl Settings {
         if !self.command_mode {
             return None;
         }
-        let chord: BTreeSet<u16> =
-            self.command_hotkey.iter().filter_map(|k| crate::hotkey::parse_key(k)).collect();
-        if chord.len() < 2 {
+        // The same rule saving used: a lone function key such as F8 passed it and was saved, then
+        // was refused here for being one key, and command mode was silently off.
+        if check_chord(&self.command_hotkey, "command hotkey").is_err() {
             return None;
         }
+        let chord: BTreeSet<u16> =
+            self.command_hotkey.iter().filter_map(|k| crate::hotkey::parse_key(k)).collect();
         let dictation = self.chord();
         if chord.is_subset(&dictation) || chord.is_superset(&dictation) {
             crate::shell_log!(
@@ -590,7 +592,25 @@ mod tests {
         assert_eq!(off.command_chord(), None);
 
         let single = Settings { command_hotkey: vec!["win".into()], ..Settings::default() };
-        assert_eq!(single.command_chord(), None, "one key is not a chord");
+        assert_eq!(single.command_chord(), None, "a lone modifier is not a chord");
+    }
+
+    #[test]
+    fn a_command_hotkey_that_saves_is_the_one_the_hook_listens_for() {
+        // A lone F8 passed validation and was saved, but never reached the hook (found by an
+        // outside review of 0.2.3).
+        let f8 = Settings { command_hotkey: vec!["f8".into()], ..Settings::default() };
+        let saved = f8.clone().validated().expect("a lone function key may be saved");
+        let f8_vk = crate::hotkey::parse_key("f8").unwrap();
+        assert_eq!(saved.command_chord(), Some([f8_vk].into_iter().collect()));
+        assert_eq!(crate::hotkey::Config::from_settings(&saved).command_chord, [f8_vk].into_iter().collect());
+
+        // And the other way round: whatever the hook would refuse, saving refuses too.
+        for keys in [vec!["win"], vec!["a"], vec!["ctrl", "nonsense"]] {
+            let s = Settings { command_hotkey: keys.iter().map(|k| k.to_string()).collect(), ..Settings::default() };
+            assert!(s.clone().validated().is_err(), "{keys:?} must not save");
+            assert_eq!(s.command_chord(), None, "{keys:?}");
+        }
     }
 
     /// Missing fields must take their defaults rather than failing the whole file, or one

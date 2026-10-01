@@ -114,6 +114,13 @@ fn log_ui_error(page: String, message: String, stack: Option<String>) {
     );
 }
 
+/// A screen that shows the microphone level while nothing is recorded (setup's microphone step)
+/// turns the meter on while it is up, and off when it goes.
+#[tauri::command]
+fn level_meter(shell: tauri::State<'_, Shell>, on: bool) {
+    shell.capture.set_metering(on);
+}
+
 #[tauri::command]
 fn restart_engine(engine: tauri::State<'_, Engine>) {
     engine.restart();
@@ -757,6 +764,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             shell_status,
             log_ui_error,
+            level_meter,
             restart_engine,
             set_autostart,
             hub_data,

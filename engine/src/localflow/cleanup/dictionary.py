@@ -69,7 +69,10 @@ class Dictionary:
     # ----------------------------------------------------------------------------------
     def apply(self, text: str) -> tuple[str, list[Match]]:
         for pat, rep in self.replacements:
-            text = pat.sub(rep, text)
+            # Through a function, so the user's text goes in exactly: as a template, "C:\temp"
+            # gained a tab, "C:\projects\notes" raised and lost the dictation, and "\1" was
+            # a group reference (as snippets learned before, in pipeline.rules).
+            text = pat.sub(lambda _m, r=rep: r, text)
         if not self.terms:
             return text, []
         tokens = list(_WORD.finditer(text))
