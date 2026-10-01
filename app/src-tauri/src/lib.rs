@@ -372,9 +372,15 @@ fn save_engine_settings(
 }
 
 /// Whether the window opens when LocalFlow starts. Started by the user: yes. Started by Windows
-/// at sign-in: only if they asked for it - or setup has not been done, which needs the window.
-fn show_window_at_start(at_sign_in: bool, onboarded: bool, open_window_at_sign_in: bool) -> bool {
-    !at_sign_in || !onboarded || open_window_at_sign_in
+/// at sign-in: only if they asked for it. Started again after a crash: no - the user is busy
+/// in another app, and the window would take the focus from what they are typing; the
+/// "restarted" notification says what happened. Setup that has not been done needs the window
+/// whatever started it.
+fn show_window_at_start(at_sign_in: bool, restarted: bool, onboarded: bool, open_window_at_sign_in: bool) -> bool {
+    if !onboarded {
+        return true;
+    }
+    !restarted && (!at_sign_in || open_window_at_sign_in)
 }
 
 /// Setup was finished before the speech model was ready: say so, once, when it is (M5).
@@ -469,10 +475,17 @@ mod tests {
 
     #[test]
     fn sign_in_starts_quietly_in_the_tray_unless_asked_otherwise() {
-        assert!(show_window_at_start(false, true, false), "opened by the user: the window");
-        assert!(!show_window_at_start(true, true, false), "at sign-in: the tray only");
-        assert!(show_window_at_start(true, true, true), "at sign-in, window asked for");
-        assert!(show_window_at_start(true, false, false), "setup not done yet: it needs the window");
+        assert!(show_window_at_start(false, false, true, false), "opened by the user: the window");
+        assert!(!show_window_at_start(true, false, true, false), "at sign-in: the tray only");
+        assert!(show_window_at_start(true, false, true, true), "at sign-in, window asked for");
+        assert!(show_window_at_start(true, false, false, false), "setup not done yet: it needs the window");
+    }
+
+    #[test]
+    fn a_restart_after_a_crash_stays_in_the_tray() {
+        assert!(!show_window_at_start(false, true, true, false), "opened by the user, then crashed");
+        assert!(!show_window_at_start(true, true, true, true), "even with the window asked for at sign-in");
+        assert!(show_window_at_start(false, true, false, false), "setup not done yet: it needs the window");
     }
 
     #[test]
@@ -603,6 +616,7 @@ pub fn run() {
     guard::install_fault_handler();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let restarted = args.iter().any(|a| a == guard::RESTARTED_ARG);
+    let at_sign_in = args.iter().any(|a| a == win::AUTOSTART_FLAG);
     let crash_test = args.iter().position(|a| a == "--crash-test").map(|i| {
         let seconds = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(65);
         let kind = args.get(i + 2).cloned().unwrap_or_default();
@@ -636,14 +650,16 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let handle = app.handle().clone();
+            // Read once, for the history clean-up below and whether to show the window.
+            let start_settings = harness.is_none().then(settings::load);
 
-            if harness.is_none() {
+            if let Some(s) = &start_settings {
                 // A sign-in entry left pointing at a program that has moved or been replaced
                 // fails silently once per sign-in, so fix it before anything else needs attention.
                 win::repair_autostart();
 
                 // History past its retention window is deleted from disk, not merely hidden.
-                history::prune_if_due(settings::load().retention_days);
+                history::prune_if_due(s.retention_days);
 
                 // A second launch (a Start-menu click while this copy sits in the tray) asks for
                 // the window instead of starting another copy.
@@ -701,20 +717,18 @@ pub fn run() {
             power::watch(handle.clone());
 
             if let (Some(names), Some(keys), Some(tape)) = (harness.clone(), keys_for_harness.take(), tape) {
-                // The Hub opens with the app; here it would only take the focus from the
-                // window the harness types into.
-                if let Some(window) = handle.get_webview_window("main") {
-                    let _ = window.hide();
-                }
                 e2e::start(handle.clone(), keys, tape, names);
             }
 
             // The window starts hidden (tauri.conf.json) and is shown here - unless Windows
             // started LocalFlow at sign-in, when it waits quietly in the tray, ready to dictate.
-            if harness.is_none() {
-                let s = settings::load();
-                if show_window_at_start(win::started_at_sign_in(), s.onboarded, s.open_window_at_sign_in) {
+            // The harness never shows it: it would only take the focus from the window the
+            // harness types into.
+            if let Some(s) = &start_settings {
+                if show_window_at_start(at_sign_in, restarted, s.onboarded, s.open_window_at_sign_in) {
                     tray::show_window(&handle);
+                } else if restarted {
+                    shell_log!("started again after a crash: waiting in the tray");
                 } else {
                     shell_log!("started at sign-in: waiting in the tray");
                 }

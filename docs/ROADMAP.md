@@ -770,6 +770,16 @@ models once after setup and on the Models page, nowhere else.
       LocalFlow window as well" brings the old behaviour back. Entries written by v0.2.1 or
       before gain the flag at the next start. Checked on the installed build
 
+## Version 0.2.3: a crash does not take the focus (2026-10-01)
+
+- [x] The copy LocalFlow starts after a crash waits in the tray instead of opening its window:
+      it was started without `--autostart`, so it took the focus from whatever the user was
+      typing in, even when the crashed copy had started quietly at sign-in. The "restarted"
+      notification says what happened; setup that has not been done still opens the window
+- [x] Review clean-ups from 0.2.2: the test harness no longer hides a window that is never
+      shown, start-up reads the settings once, and `--autostart` is read with the other
+      start-up flags in `run()`
+
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only
 - ~~Default clean-up model~~ - decided: Automatic, which picks Qwen3 4B on capable hardware

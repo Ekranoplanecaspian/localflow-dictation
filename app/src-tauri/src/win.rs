@@ -430,10 +430,6 @@ fn autostart_command() -> Option<String> {
     Some(format!("\"{}\" {AUTOSTART_FLAG}", exe.display()))
 }
 
-/// Whether this run was started by the sign-in entry.
-pub fn started_at_sign_in() -> bool {
-    std::env::args().skip(1).any(|a| a == AUTOSTART_FLAG)
-}
 
 pub fn autostart_enabled() -> bool {
     use windows::Win32::System::Registry::{
