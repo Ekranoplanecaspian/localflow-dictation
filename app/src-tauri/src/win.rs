@@ -420,10 +420,19 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The command Windows should run at sign-in: this executable, quoted.
+/// On the sign-in command line: LocalFlow was started by Windows at sign-in, not by the user, so
+/// it starts quietly in the tray (unless the user asked for the window too).
+pub const AUTOSTART_FLAG: &str = "--autostart";
+
+/// The command Windows should run at sign-in: this executable, quoted, and the flag.
 fn autostart_command() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    Some(format!("\"{}\"", exe.display()))
+    Some(format!("\"{}\" {AUTOSTART_FLAG}", exe.display()))
+}
+
+/// Whether this run was started by the sign-in entry.
+pub fn started_at_sign_in() -> bool {
+    std::env::args().skip(1).any(|a| a == AUTOSTART_FLAG)
 }
 
 pub fn autostart_enabled() -> bool {
@@ -531,12 +540,25 @@ pub fn repair_autostart() {
     if stored.trim().eq_ignore_ascii_case(want.trim()) {
         return;
     }
+    if needs_flag(&stored, autostart_target(&want)) {
+        // This very program, written by v0.2.1 or before: without the flag it would open its
+        // window at every sign-in instead of starting quietly in the tray.
+        crate::shell_log!("start-at-sign-in: adding {AUTOSTART_FLAG} so sign-in starts in the tray");
+        set_autostart(true);
+        return;
+    }
     if !autostart_is_stale(&stored, |p| p.is_file()) {
         // Another working copy of LocalFlow owns sign-in. That is a choice somebody made.
         return;
     }
     crate::shell_log!("start-at-sign-in pointed at {stored}, which is broken; repointing it at this build");
     set_autostart(true);
+}
+
+/// A sign-in entry that runs `this_exe` itself but without the flag: one to bring up to date.
+/// Another copy's entry is left to that copy.
+fn needs_flag(stored: &str, this_exe: &str) -> bool {
+    autostart_target(stored).eq_ignore_ascii_case(this_exe) && !stored.split_whitespace().any(|w| w == AUTOSTART_FLAG)
 }
 
 /// The executable a sign-in command runs: the quoted first token, or the first word.
@@ -624,6 +646,14 @@ mod tests {
     #[test]
     fn the_retired_python_app_is_repaired_even_though_python_still_exists() {
         assert!(autostart_is_stale(PYTHON, |_| true));
+    }
+
+    #[test]
+    fn this_programs_own_entry_without_the_flag_is_brought_up_to_date() {
+        let exe = r"C:\Users\u\AppData\Local\LocalFlow\app.exe";
+        assert!(needs_flag(INSTALLED, exe), "written by v0.2.1 or before");
+        assert!(!needs_flag(&format!("{INSTALLED} {AUTOSTART_FLAG}"), exe), "already has it");
+        assert!(!needs_flag(DEV, exe), "another copy's entry is that copy's business");
     }
 
     #[test]

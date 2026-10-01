@@ -213,6 +213,14 @@ export function Voice({ data, onChange, say }: SectionProps) {
                         say(now ? "will start at sign-in" : "will not start at sign-in");
                     }}
                 />
+                {autostart && (
+                    <Toggle
+                        label="Open the LocalFlow window as well"
+                        hint="Off: LocalFlow starts quietly in the tray, ready to dictate; click its icon for this window."
+                        on={settings.open_window_at_sign_in ?? false}
+                        onChange={(v) => save({ open_window_at_sign_in: v })}
+                    />
+                )}
             </article>
 
             <article className="card">

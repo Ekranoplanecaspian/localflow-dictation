@@ -371,6 +371,12 @@ fn save_engine_settings(
     Ok(())
 }
 
+/// Whether the window opens when LocalFlow starts. Started by the user: yes. Started by Windows
+/// at sign-in: only if they asked for it - or setup has not been done, which needs the window.
+fn show_window_at_start(at_sign_in: bool, onboarded: bool, open_window_at_sign_in: bool) -> bool {
+    !at_sign_in || !onboarded || open_window_at_sign_in
+}
+
 /// Setup was finished before the speech model was ready: say so, once, when it is (M5).
 #[tauri::command]
 fn notify_when_ready(chord: String) {
@@ -460,6 +466,14 @@ pub(crate) fn read_wav_16k_mono(path: &str) -> anyhow::Result<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_starts_quietly_in_the_tray_unless_asked_otherwise() {
+        assert!(show_window_at_start(false, true, false), "opened by the user: the window");
+        assert!(!show_window_at_start(true, true, false), "at sign-in: the tray only");
+        assert!(show_window_at_start(true, true, true), "at sign-in, window asked for");
+        assert!(show_window_at_start(true, false, false), "setup not done yet: it needs the window");
+    }
 
     #[test]
     fn model_actions_become_engine_messages_and_nothing_else_does() {
@@ -693,6 +707,17 @@ pub fn run() {
                     let _ = window.hide();
                 }
                 e2e::start(handle.clone(), keys, tape, names);
+            }
+
+            // The window starts hidden (tauri.conf.json) and is shown here - unless Windows
+            // started LocalFlow at sign-in, when it waits quietly in the tray, ready to dictate.
+            if harness.is_none() {
+                let s = settings::load();
+                if show_window_at_start(win::started_at_sign_in(), s.onboarded, s.open_window_at_sign_in) {
+                    tray::show_window(&handle);
+                } else {
+                    shell_log!("started at sign-in: waiting in the tray");
+                }
             }
 
             if restarted {

@@ -173,6 +173,8 @@ export type Settings = {
     hands_free_timeout_s: number;
     app_rules: Record<string, AppRule>;
     onboarded: boolean;
+    /** Started by Windows at sign-in: open the window too (off: start quietly in the tray). */
+    open_window_at_sign_in?: boolean;
 };
 
 /** The engine's clean-up settings, as they appear in its own config file. */

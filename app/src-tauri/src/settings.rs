@@ -69,6 +69,9 @@ pub struct Settings {
     /// wizard existed, which deserialises to false - so an existing install sees it once too,
     /// which is the right answer: nobody has been shown it yet.
     pub onboarded: bool,
+    /// Started by Windows at sign-in: open the LocalFlow window as well. Off by default -
+    /// sign-in starts LocalFlow quietly in the tray, ready to dictate.
+    pub open_window_at_sign_in: bool,
     /// The version of this file's layout. Raise it whenever a setting is added: an older
     /// LocalFlow then leaves the file alone instead of saving it without the setting it did not
     /// know (after a downgrade). Absent (0) in files written before it existed.
@@ -76,7 +79,7 @@ pub struct Settings {
 }
 
 /// See `Settings::version`.
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2; // 2: open_window_at_sign_in
 
 /// The version of a settings file written by a newer LocalFlow, once one has been read: from
 /// then on nothing is saved over it.
@@ -107,6 +110,7 @@ impl Default for Settings {
             hands_free_timeout_s: 8,
             app_rules: BTreeMap::new(),
             onboarded: false,
+            open_window_at_sign_in: false,
             version: SETTINGS_VERSION,
         }
     }

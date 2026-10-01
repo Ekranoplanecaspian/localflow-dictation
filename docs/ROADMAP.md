@@ -762,6 +762,14 @@ models once after setup and on the Models page, nowhere else.
       file. Seen but not a product bug: an app started from a program that was running before
       LOCALFLOW_ENGINE_EXE was removed inherits it and uses the repository's engine
 
+## Version 0.2.2: start quietly (2026-10-01)
+
+- [x] Started by Windows at sign-in, LocalFlow waits in the tray: the sign-in entry runs
+      `app.exe --autostart`, and that start leaves the window hidden (the user's own starts
+      open it as before; so does one before setup is done). Voice > Startup > "Open the
+      LocalFlow window as well" brings the old behaviour back. Entries written by v0.2.1 or
+      before gain the flag at the next start. Checked on the installed build
+
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only
 - ~~Default clean-up model~~ - decided: Automatic, which picks Qwen3 4B on capable hardware
