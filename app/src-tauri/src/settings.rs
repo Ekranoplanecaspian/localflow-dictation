@@ -159,21 +159,35 @@ fn json_text(text: &str) -> &str {
 /// aside, not ignored: it used to count as "no settings" silently, and the next change in the
 /// Hub saved the defaults over it - the hotkey, the app rules and everything else gone. A file
 /// starting with a byte-order mark (Notepad's older UTF-8) was one such file.
+///
+/// Unreadable means anything but "not there": text that is not UTF-8 (an editor saving in the
+/// ANSI code page) and a failed read counted as no settings too, set aside by nothing.
 fn load_from(path: &Path) -> Settings {
-    let Ok(text) = std::fs::read_to_string(path) else { return Settings::default() };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Settings::default(),
+        Err(e) => return set_aside(path, &e.to_string()),
+    };
+    let Ok(text) = String::from_utf8(bytes) else {
+        return set_aside(path, "it is not UTF-8 text");
+    };
     match serde_json::from_str::<Settings>(json_text(&text)) {
         Ok(settings) => settings,
-        Err(e) => {
-            let aside = path.with_extension(format!("json.broken-{}", unix_time()));
-            let kept = std::fs::rename(path, &aside).is_ok();
-            crate::shell_log!(
-                "[{}] the settings file could not be read ({e}); starting from the defaults{}",
-                crate::problems::SETTINGS_UNREADABLE.as_str(),
-                if kept { format!(", and the unreadable file was kept as {}", aside.display()) } else { String::new() }
-            );
-            Settings::default()
-        }
+        Err(e) => set_aside(path, &e.to_string()),
     }
+}
+
+/// Move an unreadable settings file out of the way, so nothing is saved over it, and start from
+/// the defaults.
+fn set_aside(path: &Path, why: &str) -> Settings {
+    let aside = path.with_extension(format!("json.broken-{}", unix_time()));
+    let kept = std::fs::rename(path, &aside).is_ok();
+    crate::shell_log!(
+        "[{}] the settings file could not be read ({why}); starting from the defaults{}",
+        crate::problems::SETTINGS_UNREADABLE.as_str(),
+        if kept { format!(", and the unreadable file was kept as {}", aside.display()) } else { String::new() }
+    );
+    Settings::default()
 }
 
 /// Written whole or not at all: to a temporary file, then moved over the old one. Writing in
@@ -460,6 +474,22 @@ mod tests {
         let kept: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().collect();
         assert_eq!(kept.len(), 1);
         assert!(std::fs::read_to_string(kept[0].path()).unwrap().contains("f8"), "the user's own file survives");
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_kept_aside_too() {
+        let path = temp("ansi");
+        // "café.exe" saved in Windows-1252: the é is one byte, 0xE9, not UTF-8.
+        let mut bytes = br#"{"hotkey": ["f7"], "app_rules": {"caf"#.to_vec();
+        bytes.push(0xE9);
+        bytes.extend_from_slice(br#".exe": {}}}"#);
+        std::fs::write(&path, &bytes).unwrap();
+        let s = load_from(&path);
+        assert_eq!(s.hotkey, Settings::default().hotkey, "the defaults, for now");
+        assert!(!path.exists(), "so the next save cannot go over it");
+        let kept: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().flatten().collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), bytes, "the user's own file survives");
     }
 
     #[test]

@@ -463,15 +463,20 @@ fn password_field(r: &Run) -> Result<String, String> {
         if timings.and_then(|t| t.get("private")).and_then(Value::as_bool) != Some(true) {
             return Err("the engine did not treat it as private".into());
         }
+        // The windows (and so this harness) see dots only, never the words.
+        let shown = text_of(final_);
         let raw = final_.get("raw").and_then(Value::as_str).unwrap_or("");
-        if text_of(final_) != raw.trim() {
-            return Err(format!("the text was cleaned up: {:?} from {raw:?}", text_of(final_)));
+        if shown.is_empty() || shown.chars().any(|c| c != '•') || raw.chars().any(|c| c != '•') {
+            return Err(format!("the words reached the windows: {shown:?} / {raw:?}"));
+        }
+        if shown.chars().count() != raw.chars().count() {
+            return Err(format!("the text was cleaned up: {} chars from {}", shown.chars().count(), raw.chars().count()));
         }
         std::thread::sleep(Duration::from_millis(400));
-        if pw.text() != raw.trim() {
-            return Err(format!("the box holds {:?}, expected exactly {:?}", pw.text(), raw.trim()));
+        if pw.text().chars().count() != shown.chars().count() {
+            return Err(format!("the box holds {} chars, expected exactly {}", pw.text().chars().count(), shown.chars().count()));
         }
-        Ok(format!("typed exactly as heard ({} chars), dots on the bar", raw.trim().chars().count()))
+        Ok(format!("typed exactly as heard ({} chars), dots everywhere else", shown.chars().count()))
     })();
     TARGET.store(before, Ordering::SeqCst);
     pw.close();

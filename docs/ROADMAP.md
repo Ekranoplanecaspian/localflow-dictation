@@ -780,6 +780,34 @@ models once after setup and on the Models page, nowhere else.
       shown, start-up reads the settings once, and `--autostart` is read with the other
       start-up flags in `run()`
 
+## Version 0.2.4: whole-codebase review fixes (2026-10-01)
+
+A review of the whole 0.2.3 codebase found ten problems; each is fixed in its own commit.
+
+- [x] An update keeps start-at-sign-in and never offers to delete the user's data. Installing
+      over an older version offers "Uninstall before installing" (already selected), which ran
+      the old uninstaller's hooks: they deleted the sign-in entry and asked whether to delete
+      settings, history and models. The uninstaller now recognises an update (run in place by
+      an installer, or `/UPDATE`) and asks nothing then; the installer keeps a copy of the
+      sign-in entry before its first page and restores it after installing (Tauri's own
+      uninstall step deletes it whenever `/UPDATE` is missing). The update to 0.2.4 still runs
+      0.2.3's uninstaller, so its question appears once more (No is the default). Checked by
+      clicking through a real update from 0.2.3: the entry was deleted mid-update and back after
+- [x] A password's words never reach a window: the shell masks partials and finals of password
+      takes, so one arriving after the next take started is dots on the bar too
+- [x] A restart, quit, setting or model request made while the shell was connecting to the
+      engine is no longer thrown away with the stale audio
+- [x] A hung engine no longer freezes the link: every send gives up after 10 s
+- [x] A download stopped at its last byte (416 on resume) is checked and finished, not failed
+      at every start after
+- [x] A password for an administrator app is never put on the clipboard
+      (`password-not-typed-admin`)
+- [x] Text is kept for Win+Alt+V, not typed, while Ctrl, Alt or Win is still held
+      (`text-kept-keys-held`, `password-not-typed-keys-held`)
+- [x] A stale engine.json naming a reused pid no longer keeps the shell from starting an engine
+- [x] Cancelling a library download no longer cancels the first run's download of the same model
+- [x] A shell.json that is not UTF-8 (or cannot be read) is set aside, not saved over
+
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only
 - ~~Default clean-up model~~ - decided: Automatic, which picks Qwen3 4B on capable hardware

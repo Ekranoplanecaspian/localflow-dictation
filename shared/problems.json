@@ -578,6 +578,36 @@
       "bar": "This app runs as administrator — press Ctrl + V to paste"
     },
     {
+      "code": "text-kept-keys-held",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "When a take's text was ready, Ctrl, Alt, Shift or Win was still held two seconds later. Typed then, every letter would have been a shortcut (Win + L locks the PC, Ctrl + W closes a tab).",
+      "title": "Kept your words: a key was still held",
+      "message": "Let go of Ctrl, Alt, Shift and Win, click where the words should go and press Win + Alt + V.",
+      "bar": "Kept — a key was still held. Win + Alt + V pastes it"
+    },
+    {
+      "code": "password-not-typed-keys-held",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "A take spoken into a password field was ready while Ctrl, Alt, Shift or Win was still held. A password is never kept for Paste last dictation, so it was not delivered.",
+      "title": "Say the password again",
+      "message": "A key was still held when the password was ready, and typing it then would have turned it into shortcuts. Let go of the keys and dictate it again.",
+      "bar": "A key was still held — say the password again"
+    },
+    {
+      "code": "password-not-typed-admin",
+      "part": "hotkey",
+      "level": "info",
+      "source": "shell",
+      "detect": "A take spoken into a password field was for an app running as administrator, where Windows blocks LocalFlow's keystrokes. A password never goes on the clipboard, so it was not delivered.",
+      "title": "Type this password yourself",
+      "message": "Windows doesn't let LocalFlow type into apps running as administrator, and LocalFlow never puts a password on the clipboard, where other programs could read it.",
+      "bar": "Administrator app — type the password yourself"
+    },
+    {
       "code": "paste-last-empty",
       "part": "hotkey",
       "level": "info",

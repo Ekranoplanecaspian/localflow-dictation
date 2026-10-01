@@ -325,6 +325,11 @@ fn run_job(job: Job) {
         if let Some(why) = obstacle(job.window, in_front, crate::win::keystrokes_blocked) {
             let chars = job.text.chars().count();
             match why {
+                // A password never goes on the clipboard, where every program can read it and
+                // the next Ctrl+V anywhere pastes it: the user types it themselves.
+                Obstacle::Elevated if job.private => {
+                    say_kept(&job.app, crate::problems::PASSWORD_NOT_TYPED_ADMIN, chars)
+                }
                 // Windows would drop the keystrokes, but not the user's own Ctrl+V.
                 Obstacle::Elevated => match copy_private(&job.text) {
                     Ok(()) => say_kept(&job.app, crate::problems::TEXT_COPIED_ADMIN, chars),
@@ -357,6 +362,23 @@ fn run_job(job: Job) {
         let _ = job.app.emit(
             "injected",
             json!({"method": "none", "chars": job.text.chars().count(), "app": job.target, "ms": 0, "error": null}),
+        );
+        return;
+    }
+    // Typed while Ctrl, Alt or Win is still held, every letter is a shortcut: Win + L locks the
+    // PC, Ctrl + W closes the tab. It used to be typed anyway after the wait, so as not to lose
+    // it; now it is kept for Win + Alt + V instead (a password, never kept, is said again).
+    if !wait_for_modifiers_released() {
+        let chars = job.text.chars().count();
+        if job.private {
+            say_kept(&job.app, crate::problems::PASSWORD_NOT_TYPED_KEYS_HELD, chars);
+        } else {
+            remember_last(job.text.trim_end());
+            say_kept(&job.app, crate::problems::TEXT_KEPT_KEYS_HELD, chars);
+        }
+        let _ = job.app.emit(
+            "injected",
+            json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
         );
         return;
     }
@@ -594,7 +616,7 @@ pub fn modifiers_down() -> bool {
 }
 
 /// Typing while the chord is still physically held would turn every letter into a shortcut.
-/// Returns false if the user never let go, in which case we type anyway rather than lose text.
+/// Returns false if the user never let go; a dictation is then kept rather than typed (`run_job`).
 pub fn wait_for_modifiers_released() -> bool {
     let deadline = Instant::now() + MODIFIER_WAIT;
     while modifiers_down() {

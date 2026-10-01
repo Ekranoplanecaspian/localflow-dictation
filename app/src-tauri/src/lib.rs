@@ -62,6 +62,8 @@ impl Sink for TauriSink {
             }
             _ => {}
         }
+        let mut payload = payload;
+        session::for_windows(event, &mut payload);
         let _ = self.0.emit(event, payload);
     }
 }

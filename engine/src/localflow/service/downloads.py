@@ -106,8 +106,13 @@ class Downloads:
                 job = Job(f"d{next(self._ids)}", kind, key, label, int(size), reason, run, cancellable)
                 self._jobs.append(job)
                 log.info("download queued: %s (%s, %.1f GB)", label, reason, size / 1e9)
-            elif PRIORITY.get(reason, 9) < PRIORITY.get(job.reason, 9):
-                job.reason = reason  # more urgent now: moves ahead of what is queued
+            else:
+                if PRIORITY.get(reason, 9) < PRIORITY.get(job.reason, 9):
+                    job.reason = reason  # more urgent now: moves ahead of what is queued
+                # Joined by something LocalFlow cannot do without (the first-run speech model),
+                # it can no longer be stopped: cancelling the download the user started from
+                # the library cancelled the first run's wait too, and dictation never came.
+                job.cancellable = job.cancellable and cancellable
             if progress is not None:
                 job.listeners.append(progress)
             if self._thread is None and not self._closing:

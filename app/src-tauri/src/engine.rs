@@ -35,6 +35,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Liveness probe. `status.get` always answers, so silence means a dead link.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 const SILENCE_LIMIT: Duration = Duration::from_secs(30);
+/// The longest one message may wait to go out. A healthy engine takes it in microseconds.
+const SEND_LIMIT: Duration = Duration::from_secs(10);
 /// A connection that lived this long counts as healthy, so the next failure starts from
 /// the shortest backoff again.
 const HEALTHY_AFTER: Duration = Duration::from_secs(30);
@@ -619,7 +621,11 @@ enum Stop {
     Restart,
     /// The link broke by itself.
     Lost(String),
-    /// The engine never answered at all.
+    /// Nothing on the port got as far as a hello: no connection, a timeout, the wrong token, not
+    /// an engine at all. For an engine known only from its info file, the file is stale. A
+    /// timeout or a failed hello used to count as `Lost`, which keeps the file: a stale one
+    /// naming a process that had since become someone's python.exe held the shell attaching to
+    /// it for ever, never starting an engine of its own.
     Unreachable(String),
 }
 
@@ -631,6 +637,37 @@ fn sentinel(text: &str) -> Option<Stop> {
         "\u{0}stop" => Some(Stop::Requested),
         _ => None,
     }
+}
+
+/// Send one message, or give up on the engine. A send waits while the socket's buffers are
+/// full, and they fill when an engine stops reading: unbounded, one hung engine held the whole
+/// link - no heartbeat, no silence check, no restart - showing "Ready" for good.
+async fn send_within<S>(tx: &mut S, msg: Message) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    send_limited(tx, msg, SEND_LIMIT).await
+}
+
+async fn send_limited<S>(tx: &mut S, msg: Message, limit: Duration) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match tokio::time::timeout(limit, tx.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!("the engine took no data for {:.0}s", limit.as_secs_f32())),
+    }
+}
+
+/// A `session.*` message: part of a take, which the session machine replays as a whole.
+fn is_session_message(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| v.get("type").and_then(Value::as_str).map(|t| t.starts_with("session.")))
+        .unwrap_or(false)
 }
 
 /// One connection, from hello to whatever ends it.
@@ -655,33 +692,50 @@ async fn run_link(
     let ws = match tokio::time::timeout(Duration::from_secs(10), connecting).await {
         Ok(Ok((ws, _))) => ws,
         Ok(Err(e)) => return Stop::Unreachable(format!("could not connect to the engine: {e}")),
-        Err(_) => return Stop::Lost("timed out connecting to the engine".into()),
+        Err(_) => return Stop::Unreachable("timed out connecting to the engine".into()),
     };
     let (mut ws_tx, mut stream) = ws.split();
 
     let hello = json!({"type": "hello", "token": token, "client": "shell"});
-    if let Err(e) = ws_tx.send(Message::Text(hello.to_string().into())).await {
-        return Stop::Lost(format!("could not greet the engine: {e}"));
+    if let Err(e) = send_within(&mut ws_tx, Message::Text(hello.to_string().into())).await {
+        return Stop::Unreachable(format!("could not greet the engine: {e}"));
     }
     match tokio::time::timeout(Duration::from_secs(10), stream.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => {
             let msg: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
             if msg.get("type").and_then(Value::as_str) != Some("hello.ok") {
-                return Stop::Lost(format!("the engine refused the handshake: {text}"));
+                return Stop::Unreachable(format!("the engine refused the handshake: {text}"));
             }
             if let Some(status) = msg.get("status") {
                 *shared.status.locked() = Some(status.clone());
                 sink.emit("engine-status", status.clone());
             }
         }
-        Ok(Some(Ok(other))) => return Stop::Lost(format!("unexpected reply to hello: {other:?}")),
-        Ok(Some(Err(e))) => return Stop::Lost(format!("the engine closed during hello: {e}")),
-        Ok(None) | Err(_) => return Stop::Lost("the engine did not answer hello".into()),
+        Ok(Some(Ok(other))) => return Stop::Unreachable(format!("unexpected reply to hello: {other:?}")),
+        Ok(Some(Err(e))) => return Stop::Unreachable(format!("the engine closed during hello: {e}")),
+        Ok(None) | Err(_) => return Stop::Unreachable("the engine did not answer hello".into()),
     }
 
-    // Anything queued while we were disconnected is stale audio from a dictation nobody will
-    // finish; start this connection with an empty queue.
-    while rx.try_recv().is_ok() {}
+    // What was queued while there was no connection. Audio and session messages belong to takes
+    // the session machine replays itself once the link is ready, and sent first they would end
+    // a replayed take early with no audio. Everything else still counts: a restart or a quit
+    // asked for meanwhile (dropping those once lost both), settings, a model download.
+    let mut still_wanted = Vec::new();
+    while let Ok(out) = rx.try_recv() {
+        let Out::Text(text) = out else { continue };
+        if let Some(stop) = sentinel(&text) {
+            let _ = send_within(&mut ws_tx, Message::Close(None)).await;
+            return stop;
+        }
+        if !is_session_message(&text) {
+            still_wanted.push(text);
+        }
+    }
+    for text in still_wanted {
+        if let Err(e) = send_within(&mut ws_tx, Message::Text(text.into())).await {
+            return Stop::Lost(format!("send failed: {e}"));
+        }
+    }
     shared.set_link(sink, Link::Ready, None, attached, Some(pid));
 
     let mut beat = tokio::time::interval(HEARTBEAT);
@@ -696,15 +750,15 @@ async fn run_link(
                 None => return Stop::Requested,
                 Some(Out::Text(text)) => {
                     if let Some(stop) = sentinel(&text) {
-                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = send_within(&mut ws_tx, Message::Close(None)).await;
                         return stop;
                     }
-                    if let Err(e) = ws_tx.send(Message::Text(text.into())).await {
+                    if let Err(e) = send_within(&mut ws_tx, Message::Text(text.into())).await {
                         return Stop::Lost(format!("send failed: {e}"));
                     }
                 }
                 Some(Out::Audio(bytes)) => {
-                    if let Err(e) = ws_tx.send(Message::Binary(bytes.into())).await {
+                    if let Err(e) = send_within(&mut ws_tx, Message::Binary(bytes.into())).await {
                         return Stop::Lost(format!("audio send failed: {e}"));
                     }
                 }
@@ -734,7 +788,7 @@ async fn run_link(
                 } else if !crate::win::pid_alive(pid) {
                     return Stop::Lost("the engine we attached to went away".into());
                 }
-                if let Err(e) = ws_tx.send(Message::Text(json!({"type": "status.get"}).to_string().into())).await {
+                if let Err(e) = send_within(&mut ws_tx, Message::Text(json!({"type": "status.get"}).to_string().into())).await {
                     return Stop::Lost(format!("heartbeat failed: {e}"));
                 }
             }
@@ -816,6 +870,44 @@ mod message_tests {
         dispatch(&sink, &shared, r#"{"type":"status","stt":"not an object"}"#);
         let events: Vec<String> = recorded.0.locked().iter().map(|(e, _)| e.clone()).collect();
         assert_eq!(events, ["final", "engine-status"]);
+    }
+
+    #[test]
+    fn only_take_messages_are_dropped_from_what_waited_for_a_connection() {
+        assert!(is_session_message(&json!({"type": "session.start", "id": "s1"}).to_string()));
+        assert!(is_session_message(&json!({"id": "s1", "type": "session.end"}).to_string()));
+        assert!(!is_session_message(&json!({"type": "settings.set", "postprocess": {}}).to_string()));
+        assert!(!is_session_message(&json!({"type": "models.download", "kind": "speech"}).to_string()));
+        assert!(!is_session_message("\u{0}restart"), "sentinels are acted on, not dropped");
+        assert!(matches!(sentinel("\u{0}restart"), Some(Stop::Restart)));
+        assert!(matches!(sentinel("\u{0}stop"), Some(Stop::Requested)));
+    }
+
+    /// A sink that never takes anything: an engine that has stopped reading.
+    struct Stuck;
+
+    impl futures_util::Sink<Message> for Stuck {
+        type Error = String;
+        fn poll_ready(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), String>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), String> {
+            Ok(())
+        }
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), String>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), String>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_send_to_an_engine_that_stopped_reading_gives_up() {
+        let started = std::time::Instant::now();
+        let sent = send_limited(&mut Stuck, Message::Binary(vec![0u8; 640].into()), Duration::from_millis(50)).await;
+        assert!(sent.is_err(), "it must not wait for ever");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

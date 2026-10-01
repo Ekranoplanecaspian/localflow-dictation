@@ -77,6 +77,18 @@ def test_asking_again_joins_the_download_and_can_make_it_more_urgent(q):
     gate.go.set()
 
 
+def test_a_library_download_joined_by_the_first_run_can_no_longer_be_stopped(q):
+    gate = Gate()
+    library = q.request("speech", "parakeet-v3", "Parakeet v3", 100, gate, "library")
+    assert gate.started.wait(2) and library.cancellable
+    joined = q.request("speech", "parakeet-v3", "Parakeet v3", 100, Gate(), "first-run", cancellable=False)
+    assert joined is library
+    assert not q.cancel(library.id), "the first run is waiting for it"
+    assert [v["cancellable"] for v in q.views()] == [False]
+    gate.go.set()
+    assert wait(lambda: library.state == "done")
+
+
 def test_a_running_download_is_stopped_and_a_queued_one_taken_out(q):
     running, queued = Gate(), Gate()
     a = q.request("speech", "a", "A", 100, running, "library")

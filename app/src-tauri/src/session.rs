@@ -22,6 +22,39 @@ const MIN_TAKE: std::time::Duration = std::time::Duration::from_millis(300);
 const RECOVER_WITHIN: std::time::Duration = std::time::Duration::from_secs(90);
 /// Replayed audio goes to the engine a second at a time, well inside its message size limit.
 const REPLAY_CHUNK: usize = crate::audio::SAMPLE_RATE as usize;
+/// Password takes remembered, so their words are masked however late they arrive.
+const PRIVATE_TAKES_KEPT: usize = 32;
+
+/// Recent takes spoken into a password field, oldest first.
+static PRIVATE_TAKES: Mutex<std::collections::VecDeque<String>> = Mutex::new(std::collections::VecDeque::new());
+
+fn remember_private(id: &str) {
+    let mut takes = PRIVATE_TAKES.locked();
+    if takes.len() >= PRIVATE_TAKES_KEPT {
+        takes.pop_front();
+    }
+    takes.push_back(id.to_owned());
+}
+
+/// What the windows (flow bar, Hub, setup) may see of an engine event: a password take's words
+/// become dots here, in the shell. Masking only in the windows was not enough: they unmasked at
+/// every new take, so a password's final arriving after the next take had started was shown in
+/// plain text on the bar.
+pub fn for_windows(event: &str, payload: &mut Value) {
+    if !matches!(event, "partial" | "final") {
+        return;
+    }
+    let Some(id) = payload.get("id").and_then(Value::as_str) else { return };
+    if !PRIVATE_TAKES.locked().iter().any(|t| t == id) {
+        return;
+    }
+    for field in ["text", "raw"] {
+        if let Some(words) = payload.get(field).and_then(Value::as_str) {
+            let dots = "•".repeat(words.trim().chars().count());
+            payload[field] = Value::String(dots);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -254,6 +287,10 @@ impl SessionManager {
         let spoken = Spoken { context: context.clone(), language: language.clone(), audio: Vec::new(), window, private };
         let take =
             Active { id: id.clone(), mode, started: Instant::now(), target, ended: false, spoken, orphaned: false };
+        if private {
+            // Before the engine can answer with a single word of it.
+            remember_private(&id);
+        }
         let mut takes = self.takes.locked();
         if let Some(abandoned) = takes.begin(take) {
             self.engine.session_cancel(&abandoned);
@@ -648,6 +685,26 @@ pub fn on_error(app: &AppHandle, msg: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_password_takes_words_never_reach_the_windows_however_late() {
+        remember_private("t-pw");
+        // The password's final arrives after the next take has started: still dots.
+        let mut late = json!({"type": "final", "id": "t-pw", "text": "hunter2 ", "raw": "hunter2", "timings": {}});
+        for_windows("final", &mut late);
+        assert_eq!(late["text"], "•••••••");
+        assert_eq!(late["raw"], "•••••••");
+        let mut partial = json!({"type": "partial", "id": "t-pw", "text": "hun"});
+        for_windows("partial", &mut partial);
+        assert_eq!(partial["text"], "•••");
+
+        let mut ordinary = json!({"type": "final", "id": "t-other", "text": "Hello there.", "raw": "hello there"});
+        for_windows("final", &mut ordinary);
+        assert_eq!(ordinary["text"], "Hello there.", "other takes are shown as they are");
+        let mut status = json!({"type": "status", "id": "t-pw", "text": "not words"});
+        for_windows("engine-status", &mut status);
+        assert_eq!(status["text"], "not words", "only partials and finals carry words");
+    }
 
     /// "Heard nothing" is for a microphone sending silence, never for a quiet room or a short
     /// press.
