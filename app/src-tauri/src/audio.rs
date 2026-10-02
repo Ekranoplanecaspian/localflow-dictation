@@ -43,6 +43,14 @@ pub const PREROLL_MS: usize = 500;
 const PREROLL_SAMPLES: usize = SAMPLE_RATE as usize * PREROLL_MS / 1000;
 /// The flow bar's waveform wants a steady stream of levels, not one per audio block.
 const METER_HZ: u64 = 50;
+/// How long one request for the idle meter lasts. The screen asking renews it every second.
+const METERING_RENEW_MS: u64 = 3000;
+
+/// Milliseconds on a clock that only moves forward, for deadlines.
+fn now_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
 /// No audio for this long while a stream is supposed to be running means the device is gone
 /// (unplugged, or the machine came back from sleep with a different default).
 const SILENCE_REBUILD: Duration = Duration::from_secs(3);
@@ -51,9 +59,11 @@ const DEVICE_CHECK_TICKS: u32 = 6;
 
 struct Shared {
     recording: AtomicBool,
-    /// Something on screen shows the microphone's level while nothing is being recorded (the
-    /// setup wizard's "Say something - the bar should move").
-    metering: AtomicBool,
+    /// Until when (`now_ms`) something on screen shows the microphone's level while nothing is
+    /// being recorded (the setup wizard's "Say something - the bar should move"). A deadline the
+    /// screen keeps renewing, not a switch: a window closed while showing the meter is hidden,
+    /// not unmounted, and a switch it never turned off sent 50 events a second for good.
+    metering_until: AtomicU64,
     /// Set with `recording`; the first callback afterwards flushes the pre-roll.
     arm: AtomicBool,
     /// Most recent peak, as f32 bits, for the level meter.
@@ -104,7 +114,7 @@ impl Tape {
 fn new_shared() -> Arc<Shared> {
     Arc::new(Shared {
         recording: AtomicBool::new(false),
-        metering: AtomicBool::new(false),
+        metering_until: AtomicU64::new(0),
         arm: AtomicBool::new(false),
         level: AtomicU32::new(0),
         produced: AtomicU64::new(0),
@@ -167,7 +177,7 @@ impl Capture {
     pub fn start(app: AppHandle, sessions: Arc<SessionManager>) -> Capture {
         let shared = Arc::new(Shared {
             recording: AtomicBool::new(false),
-            metering: AtomicBool::new(false),
+            metering_until: AtomicU64::new(0),
             arm: AtomicBool::new(false),
             level: AtomicU32::new(0),
             produced: AtomicU64::new(0),
@@ -205,9 +215,11 @@ impl Capture {
     }
 
     /// Send the level meter's readings while nothing is recorded too, for a screen that asks
-    /// the user to speak and shows the microphone hearing them. Off again when it closes.
+    /// the user to speak and shows the microphone hearing them: for the next few seconds, renewed
+    /// by the screen for as long as it can be seen. `false` stops at once.
     pub fn set_metering(&self, on: bool) {
-        self.shared.metering.store(on, Ordering::SeqCst);
+        let until = if on { now_ms() + METERING_RENEW_MS } else { 0 };
+        self.shared.metering_until.store(until, Ordering::SeqCst);
     }
 
     pub fn level(&self) -> f32 {
@@ -253,7 +265,7 @@ fn meter(app: AppHandle, shared: Arc<Shared>) {
         // Idle, the meter is quiet: nothing shows it, and 50 events a second would be wasted.
         // Unless a screen asked for it - setup's microphone step used to say "the bar should
         // move" to a meter that only moved while dictating (found by an outside review of 0.2.3).
-        let wanted = recording || shared.metering.load(Ordering::Relaxed);
+        let wanted = recording || now_ms() < shared.metering_until.load(Ordering::Relaxed);
         if !wanted && !settling {
             continue;
         }

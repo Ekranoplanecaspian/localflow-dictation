@@ -145,6 +145,17 @@ mod tests {
         assert_eq!(typed.map_err(|e| e.code()), Err(WINDOW_CHANGED));
     }
 
+    /// Typing that stops part-way keeps only what had not gone out (found reviewing 0.2.5).
+    #[test]
+    fn only_complete_characters_count_as_typed() {
+        // "ab" then a Shift+Enter: two events each for a and b, four for the line break.
+        let ends = [2, 4, 8];
+        assert_eq!(chars_sent(&ends, 0), 0);
+        assert_eq!(chars_sent(&ends, 4), 2);
+        assert_eq!(chars_sent(&ends, 6), 2, "half a line break is not one");
+        assert_eq!(chars_sent(&ends, 128), 3);
+    }
+
     #[test]
     fn this_process_does_not_block_its_own_keystrokes() {
         assert!(!crate::win::keystrokes_blocked(0));
@@ -376,15 +387,36 @@ fn say_kept(app: &AppHandle, code: crate::problems::Code, chars: usize) {
 /// A job whose text is not typed: say why, keep it for Win + Alt + V (never a password), and
 /// report it.
 fn keep(job: &Job, code: crate::problems::Code) {
-    let chars = job.text.chars().count();
-    if !job.private {
-        remember_last(job.text.trim_end());
+    keep_after(job, code, 0);
+}
+
+/// `keep`, for a job whose first `typed` characters already reached its window: only the rest is
+/// kept. Keeping the whole text made Win + Alt + V type the first part a second time.
+fn keep_after(job: &Job, code: crate::problems::Code, typed: usize) {
+    let rest: String = job.text.chars().skip(typed).collect();
+    let chars = rest.chars().count();
+    if !job.private && !rest.trim().is_empty() {
+        remember_last(rest.trim_end());
+    }
+    if typed > 0 {
+        crate::shell_log!("{typed} chars were typed before the window changed; the other {chars} are kept");
     }
     say_kept(&job.app, code, chars);
     let _ = job.app.emit(
         "injected",
         json!({"method": "kept", "chars": chars, "app": job.target, "ms": 0, "error": null}),
     );
+}
+
+thread_local! {
+    /// How many characters `type_text` had sent when it stopped for a window change.
+    static TYPED_BEFORE_STOP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many characters are complete once `sent` input events have gone out, given where each
+/// character's events end.
+fn chars_sent(char_ends: &[usize], sent: usize) -> usize {
+    char_ends.iter().take_while(|end| **end <= sent).count()
 }
 
 /// The error for keys that stopped because their window was no longer in front.
@@ -451,9 +483,10 @@ fn run_job(job: Job) {
         }
     };
     // The window went out of front while the keys were going out (or before the paste):
-    // whatever had not reached it is not sent anywhere else, and the whole text is kept.
+    // whatever had not reached it is not sent anywhere else, and that rest is kept.
     if matches!(&result, Err(e) if e.code() == WINDOW_CHANGED) {
-        return keep(&job, crate::problems::TEXT_KEPT_WINDOW_CHANGED);
+        let typed = TYPED_BEFORE_STOP.with(|t| t.get());
+        return keep_after(&job, crate::problems::TEXT_KEPT_WINDOW_CHANGED, typed);
     }
     let method = *result.as_ref().unwrap_or(&wanted);
     let payload = json!({
@@ -739,9 +772,10 @@ fn batching() -> Batching {
 
 fn type_text(text: &str, shift_enter: bool, window: isize) -> windows::core::Result<()> {
     let mut inputs: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
+    let mut char_ends: Vec<usize> = Vec::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            '\r' => continue,
+            '\r' => {}
             '\n' => {
                 if shift_enter {
                     inputs.push(key(VK_SHIFT, 0, KEYBD_EVENT_FLAGS(0)));
@@ -760,14 +794,19 @@ fn type_text(text: &str, shift_enter: bool, window: isize) -> windows::core::Res
                 }
             }
         }
+        char_ends.push(inputs.len());
     }
     // Each batch goes only to the window it is for: one that left the front part-way through
     // gets no more of it, and neither does whatever came in front instead.
-    let send_to = |batch: &[INPUT]| {
+    let mut sent = 0usize;
+    let mut send_to = |batch: &[INPUT]| {
         if !still_in_front(window) {
+            TYPED_BEFORE_STOP.with(|t| t.set(chars_sent(&char_ends, sent)));
             return Err(window_changed());
         }
-        send(batch)
+        send(batch)?;
+        sent += batch.len();
+        Ok(())
     };
     match batching() {
         Batching::All => {
@@ -802,6 +841,7 @@ fn paste_text(text: &str, window: isize) -> windows::core::Result<()> {
     let ours = unsafe { GetClipboardSequenceNumber() };
     if !still_in_front(window) {
         let _ = previous.restore_unless_replaced(ours);
+        TYPED_BEFORE_STOP.with(|t| t.set(0));
         return Err(window_changed());
     }
     let mut inputs = Vec::with_capacity(4);

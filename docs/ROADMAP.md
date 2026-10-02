@@ -835,6 +835,27 @@ where one could be written.
 - Not taken up from the review: its licence advice and the meeting-notes plan are product
   decisions for later, not defects
 
+## Version 0.2.6: whole-codebase review of 0.2.5 (2026-10-02)
+
+A third review of the whole codebase, aimed at what the first two had not read (the session
+machine's recovery, the engine's long takes, its config) and at the code 0.2.4 and 0.2.5 added.
+Seven findings, each fixed in its own commit.
+
+- [x] A refused Hub save puts its fields back (`revert` in useSaved.ts): since 0.2.5 kept unsaved
+      edits through refreshes, a refused value stayed, and Voice and Apps - which save the whole
+      settings object - sent it again with every later change. A regression from 0.2.5
+- [x] A chunk of a long take that fails to decode is decoded again at the end of the take, or the
+      take fails visibly; it was silently left out of the text
+- [x] A take replayed after an engine restart no longer sets the phase to idle while a newer take
+      is being spoken (the flow bar vanished mid-dictation)
+- [x] A take's audio goes into a doubling buffer instead of being copied whole with every 20 ms
+      frame on the engine's event loop
+- [x] An unreadable config.json that cannot be moved aside, or cannot be read at all, is left as
+      it is: the engine starts on the defaults and saves nothing over it (`keep_file`)
+- [x] Typing cut short by a window change keeps only the characters that had not gone out
+- [x] The idle microphone meter is a deadline setup renews while its window is visible, so a
+      closed setup window no longer leaves it sending 50 events a second
+
 ## Open decisions (yours)
 - Product name - LocalFlow for now (2026-09-24); a rename changes the display name only
 - ~~Default clean-up model~~ - decided: Automatic, which picks Qwen3 4B on capable hardware

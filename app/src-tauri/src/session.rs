@@ -200,6 +200,14 @@ impl Takes {
         batch
     }
 
+    /// Whether a take's text arriving may put the phase back to idle: only when no take is
+    /// current. Not whether the arriving take once was current - a take replayed after an engine
+    /// restart was the current one when its engine went away, and its text, landing while a
+    /// newer take was being spoken, set idle and took the flow bar away mid-dictation.
+    fn may_go_idle(&self) -> bool {
+        self.active.is_none()
+    }
+
     /// Nothing waits for an engine any more, and nothing still recording will.
     fn nothing_to_recover(&self) -> bool {
         self.recovering.is_empty() && !self.active.as_ref().is_some_and(|a| a.orphaned)
@@ -432,7 +440,8 @@ impl SessionManager {
                     }
                     drop(takes);
                     crate::shell_log!("no engine came back in {:?}; lost: {}", RECOVER_WITHIN, lost.join(", "));
-                    this.set_phase(Phase::Idle, None);
+                    // Not over a take started since, which is being spoken now.
+                    this.idle_unless_busy();
                     let lost = crate::problems::show(crate::problems::TAKE_LOST, &[]);
                     let _ = this.app.emit("engine-error", json!({"code": lost.code, "message": lost.message}));
                     break;
@@ -475,9 +484,10 @@ pub fn on_final(app: &AppHandle, msg: &Value) {
     let owed = {
         let mut takes = sessions.takes.locked();
         let owed = takes.settle(&id);
-        // The current take's text is in: back to idle - except for a command, whose take is
-        // only half the work, so it stays at Finishing until the edit comes back.
-        if matches!(&owed, Some(o) if o.was_active && o.mode == Mode::Dictate) {
+        // Its text is in: back to idle, unless another take is current now - and except for a
+        // command, whose take is only half the work, so it stays at Finishing until the edit
+        // comes back.
+        if matches!(&owed, Some(o) if o.mode == Mode::Dictate) && takes.may_go_idle() {
             sessions.set_phase(Phase::Idle, None);
         }
         owed
@@ -712,7 +722,7 @@ pub fn on_error(app: &AppHandle, msg: &Value) {
     }
     // Whatever the take was, nothing more is coming for it.
     let mut takes = sessions.takes.locked();
-    if matches!(takes.settle(&id), Some(o) if o.was_active) {
+    if takes.settle(&id).is_some() && takes.may_go_idle() {
         sessions.set_phase(Phase::Idle, None);
     }
 }
@@ -798,6 +808,24 @@ mod tests {
         let s1 = t.settle("s1").expect("the current take");
         assert!(s1.was_active);
         assert_eq!(t.settle("s0"), None, "settled once only");
+    }
+
+    /// A take replayed to a new engine was the current one when the old engine went away; its
+    /// text arriving while a newer take is spoken must not put the phase back to idle (found
+    /// reviewing 0.2.5).
+    #[test]
+    fn a_replayed_takes_text_does_not_end_the_take_being_spoken_now() {
+        let mut t = Takes::default();
+        t.begin(take("s0", Mode::Dictate, "notepad.exe"));
+        end(&mut t);
+        assert!(!t.orphan_all(), "ended, so it waits for the next engine");
+        assert_eq!(t.take_recovering().len(), 1, "replayed to the new engine");
+        t.begin(take("s1", Mode::Dictate, "notepad.exe")); // the user dictates again meanwhile
+        let s0 = t.settle("s0").expect("still owed its text");
+        assert!(s0.was_active, "it was current when its engine went away");
+        assert!(!t.may_go_idle(), "s1 is being spoken");
+        t.settle("s1");
+        assert!(t.may_go_idle());
     }
 
     /// A command's spoken instruction came back as a dictation once a newer take had started,

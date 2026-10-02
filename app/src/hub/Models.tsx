@@ -6,7 +6,7 @@ import { formatSize } from "./downloads";
 import { ModelPicker, Progress } from "./ModelPicker";
 import { Recommended } from "./Recommended";
 import type { ComputeStatus, HubData, ModelChoice, ModelState, PostProcess, SectionProps } from "./types";
-import { useSaved } from "./useSaved";
+import { revert, useSaved } from "./useSaved";
 
 /**
  * Where a part stands, in words, at the top of its card: off, waiting for its download (with the
@@ -117,6 +117,8 @@ export function Models({ data, onChange, say }: SectionProps) {
             say("saved");
             window.setTimeout(onChange, 400);
         } catch (e) {
+            setDraft((d) => revert(d, saved, patch));
+            if ("custom_instructions" in patch) setInstructions(saved.custom_instructions ?? "");
             say(String(e));
         }
     };

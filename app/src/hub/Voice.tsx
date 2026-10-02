@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { pretty, useChordCapture } from "./useChordCapture";
 import type { SectionProps, Settings } from "./types";
-import { useSaved } from "./useSaved";
+import { revert, useSaved } from "./useSaved";
 
 function Toggle({
     label,
@@ -52,6 +52,8 @@ export function Voice({ data, onChange, say }: SectionProps) {
             say("saved");
             void onChange();
         } catch (e) {
+            // Refused: back to what is saved, or every later change here is refused with it.
+            setSettings((s) => revert(s, data.settings, patch));
             say(String(e));
         }
     };

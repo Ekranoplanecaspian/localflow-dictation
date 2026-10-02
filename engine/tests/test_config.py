@@ -231,3 +231,39 @@ def test_a_16_gb_pc_starts_with_clean_up_on(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hwinfo, "ram_gb", lambda: 15.4)
     assert Config.load(tmp_path / "config.json").postprocess.llm_cleanup is True
+
+
+def test_an_unreadable_config_that_cannot_be_moved_aside_is_not_saved_over(tmp_path, monkeypatch):
+    """The defaults were saved over it whether or not it had been moved aside, and with it the
+    user's dictionary (found reviewing 0.2.5)."""
+    from localflow import config as C
+
+    path = tmp_path / "config.json"
+    broken = '{"postprocess": {"dictionary_terms": ["Arnab"'
+    path.write_text(broken, encoding="utf-8")
+    monkeypatch.setattr(C, "_set_aside", lambda p: None)  # open elsewhere: it cannot be moved
+    cfg = Config.load(path)
+    assert cfg.postprocess.dictionary_terms == [], "defaults, for now"
+    cfg.save(path)  # a change from the Hub, say
+    assert path.read_text(encoding="utf-8") == broken, "the user's file is left as it was"
+
+
+def test_a_config_that_cannot_be_read_starts_the_engine_on_defaults(tmp_path, monkeypatch):
+    """A read error (a file another program holds) stopped the engine at start-up."""
+    import pathlib
+
+    path = tmp_path / "config.json"
+    path.write_text('{"postprocess": {"dictionary_terms": ["Arnab"]}}', encoding="utf-8")
+    real = pathlib.Path.read_text
+
+    def locked(self, *a, **k):
+        if self == path:
+            raise PermissionError(13, "The process cannot access the file")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", locked)
+    cfg = Config.load(path)
+    assert cfg.postprocess.dictionary_terms == []
+    cfg.save(path)
+    monkeypatch.setattr(pathlib.Path, "read_text", real)
+    assert "Arnab" in path.read_text(encoding="utf-8"), "nothing was saved over it"

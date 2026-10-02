@@ -225,3 +225,86 @@ def test_engine_cleans_up_the_final_text_and_prefills_mid_utterance(monkeypatch)
     assert t["profile"] == "chat", "the target app picked the style profile"
     assert session.live_decodes >= 1, "the prefill came from a live decode"
     assert t["llm_ms"] is not None and t["release_to_final_ms"] is not None
+
+
+class _FailingChunksSTT(FakeSTT):
+    """Fails its first `failures` decodes: with live decoding off, those are the long take's
+    first chunk (and, for more than one, its second try)."""
+
+    def __init__(self, failures: int):
+        super().__init__()
+        self.failures = failures
+
+    def transcribe(self, audio, language=None):
+        if self.failures:
+            self.failures -= 1
+            self.calls.append(-1.0)
+            raise RuntimeError("the speech worker stopped")
+        return super().transcribe(audio, language)
+
+
+def _long_take(monkeypatch, stt):
+    """A ~35 s take through the engine, with no live decodes: its first chunk closes at ~22 s."""
+    import localflow.service.engine as eng
+
+    monkeypatch.setattr(eng, "build_transcriber", lambda cfg: stt)
+    monkeypatch.setattr(eng, "LIVE_PERIOD_S", 1e9)
+    cfg = Config()
+    cfg.postprocess.llm_cleanup = False
+    engine = eng.Engine(cfg)
+    engine.load()
+    deadline = time.monotonic() + 30
+    while engine.state == "loading" and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert engine.state == "ready", engine.error
+    events: list[dict] = []
+    session = engine.start_session("long", {"app": "notepad.exe"}, events.append)
+    speech = fixture_audio()
+    take = np.concatenate([speech] * int(np.ceil(35 * SR / len(speech))))
+    for b in blocks(take):
+        session.feed((np.clip(b * 32767, -32768, 32767)).astype("<i2").tobytes())
+    session.end()
+    deadline = time.monotonic() + 30
+    while not session.done and time.monotonic() < deadline:
+        time.sleep(0.05)
+    engine.shutdown()
+    return session, events
+
+
+def test_a_chunk_that_failed_to_decode_is_decoded_again_not_left_out(monkeypatch):
+    """A failed chunk was dropped from the text without a word (found reviewing 0.2.5)."""
+    stt = _FailingChunksSTT(failures=1)
+    session, events = _long_take(monkeypatch, stt)
+    final = [e for e in events if e["type"] == "final"]
+    assert final, f"no final: {events}"
+    assert len(session.finalized) >= 1 and all(t for t in session.finalized), "every chunk has its text"
+    pieces = final[0]["raw"].split()
+    assert len(pieces) == len(session.finalized) + 1, f"each chunk and the tail: {final[0]['raw']!r}"
+
+
+def test_a_chunk_that_fails_twice_fails_the_take_where_the_user_sees_it(monkeypatch):
+    stt = _FailingChunksSTT(failures=2)
+    _session, events = _long_take(monkeypatch, stt)
+    assert not [e for e in events if e["type"] == "final"], "no text with a hole in it"
+    errors = [e for e in events if e["type"] == "error"]
+    assert errors and errors[0].get("id") == "long"
+
+
+def test_a_long_take_is_buffered_without_copying_it_every_frame():
+    """Ten minutes of 20 ms frames: the audio is exact, and the buffer grew a handful of times
+    rather than being copied whole with every frame (found reviewing 0.2.5)."""
+    from localflow.service.engine import Session
+
+    s = Session.__new__(Session)  # only the buffer is under test
+    s._buf = np.zeros(30 * SR, dtype=np.float32)
+    s.samples = 0
+    rng = np.random.default_rng(1)
+    frames = [rng.standard_normal(SR // 50).astype(np.float32) for _ in range(30_000)]
+    grown, size = 0, s._buf.size
+    for f in frames:
+        s._append(f)
+        if s._buf.size != size:
+            grown, size = grown + 1, s._buf.size
+    assert s.samples == 600 * SR
+    assert np.array_equal(s._buf[:s.samples], np.concatenate(frames))
+    assert grown <= 5, f"grew {grown} times"

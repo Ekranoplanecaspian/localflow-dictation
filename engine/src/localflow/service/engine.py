@@ -58,6 +58,7 @@ REUSE_LIVE_MS = 100  # the last live decode stands as the final if no more than 
 CHUNK_TARGET_S = 22.0  # start looking for a phrase boundary to close the chunk after this
 CHUNK_MIN_S = 10.0  # ... but never make a chunk shorter than this
 CHUNK_HARD_S = 26.0  # cut here if no phrase boundary showed up (model limit is ~30 s)
+INITIAL_BUFFER_S = 30  # a take's audio buffer starts this long and doubles when full
 PREFILL_AFTER_S = 1.5  # warm the language model's prompt cache once the take is this long
 # A take that ends while the clean-up model is waking from an idle unload waits this long for
 # it before going out with the rules alone. The model is woken when the take starts, so usually
@@ -116,11 +117,17 @@ class Session:
         self.language = language
         self.mode = engine.live_mode()  # continuous | periodic
         self.segmenter = Segmenter(engine.vad)
-        self._audio = np.zeros(0, dtype=np.float32)
+        # The take's audio so far is self._buf[:self.samples]. The buffer doubles when full: it
+        # used to be one array concatenated with every 20 ms frame, which copied the whole take
+        # fifty times a second on the server's event loop - about 1 GB/s ten minutes into a
+        # hands-free take. Readers on the speech worker only read samples written before they
+        # were asked, and a grown buffer is swapped in whole, so they never see a partial copy.
+        self._buf = np.zeros(INITIAL_BUFFER_S * SAMPLE_RATE, dtype=np.float32)
         self.samples = 0
         self.closed: list[Segment] = []
         self.chunk_start = 0
         self.finalized: list[str | None] = []  # closed chunks, in order (None until decoded)
+        self._chunk_bounds: list[tuple[int, int]] = []  # each closed chunk's audio, to decode it again
         self.live_text = ""
         self.live_decodes = 0
         self._live_pending = False
@@ -165,8 +172,7 @@ class Session:
         if self.cancelled or self.done or self.ending:
             return
         block = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
-        self._audio = np.concatenate([self._audio, block]) if self._audio.size else block
-        self.samples = self._audio.size
+        self._append(block)
         self.closed += self.segmenter.feed(block)
         boundary = self._chunk_boundary()
         if boundary is not None:
@@ -174,6 +180,15 @@ class Session:
         if self.mode == "periodic" and not self._live_pending and self.samples - self._live_at >= LIVE_PERIOD_S * SAMPLE_RATE:
             self._live_pending = True
             self._jobs.append(self.engine.submit(self._live))
+
+    def _append(self, block: np.ndarray) -> None:
+        end = self.samples + block.size
+        if end > self._buf.size:
+            grown = np.zeros(max(end, 2 * self._buf.size), dtype=np.float32)
+            grown[:self.samples] = self._buf[:self.samples]
+            self._buf = grown
+        self._buf[self.samples:end] = block
+        self.samples = end
 
     def _slice(self, start: int, end: int) -> np.ndarray:
         """Audio [start, end), conditioned and zero-padded up to the next BUCKET_S multiple.
@@ -184,7 +199,7 @@ class Session:
         bucket = int(BUCKET_S * SAMPLE_RATE)
         padded = ((n + bucket - 1) // bucket) * bucket
         out = np.zeros(max(padded, bucket), dtype=np.float32)
-        out[:n] = condition(self._audio[start:end])
+        out[:n] = condition(self._buf[start:end])
         return out
 
     # chunking (long takes) ---------------------------------------------------------------------
@@ -204,6 +219,7 @@ class Session:
     def _finalize_chunk(self, boundary: int) -> None:
         index = len(self.finalized)
         self.finalized.append(None)
+        self._chunk_bounds.append((self.chunk_start, boundary))
         audio = self._slice(self.chunk_start, boundary)
         self.chunk_start = boundary
         self._live_at = boundary
@@ -213,7 +229,13 @@ class Session:
             if self.cancelled:
                 return
             t0 = time.perf_counter()
-            self.finalized[index] = self.engine.transcribe(audio, language=self.language)
+            try:
+                self.finalized[index] = self.engine.transcribe(audio, language=self.language)
+            except Exception as e:
+                # Left undecoded; the end of the take tries it again (`_redecode_failed_chunks`).
+                log.warning("%s: chunk %d could not be decoded (%s: %s)", self.id, index + 1,
+                            type(e).__name__, str(e)[:200])
+                return
             self.timings.stt_live_ms += (time.perf_counter() - t0) * 1000
             self._emit_partial()
 
@@ -295,6 +317,7 @@ class Session:
                     self.reused_live = True
                 else:
                     tail = self.engine.transcribe(tail_audio, language=self.language)
+                self._redecode_failed_chunks()
                 self.timings.stt_final_ms = (time.perf_counter() - t0) * 1000
                 raw = self._text_so_far(tail)
                 self.engine.submit_llm(lambda: self._clean_and_emit(raw))
@@ -304,6 +327,20 @@ class Session:
                 self.done = True
 
         self._jobs.append(self.engine.submit(decode_tail))
+
+    def _redecode_failed_chunks(self) -> None:
+        """Decode again any chunk of a long take whose decode failed. Speech jobs run one at a
+        time, in order, so every chunk's own decode has finished by now.
+
+        A failed chunk used to be left out of the text without a word: a minute's dictation came
+        back with 10-26 s missing from the middle, as if nothing had gone wrong. Decoded again
+        here it is slower but whole; if it fails again this raises, and the take fails where the
+        user can see it rather than arriving with a hole."""
+        for index, text in enumerate(self.finalized):
+            if text is None and not self.cancelled:
+                start, end = self._chunk_bounds[index]
+                log.warning("%s: decoding chunk %d again", self.id, index + 1)
+                self.finalized[index] = self.engine.transcribe(self._slice(start, end), language=self.language)
 
     def _clean_and_emit(self, raw: str) -> None:
         try:

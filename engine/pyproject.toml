@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "localflow"
-version = "0.2.5"
+version = "0.2.6"
 description = "Local, private push-to-talk dictation for Windows (Wispr Flow style)."
 requires-python = ">=3.11"
 # The engine owns the models and nothing else. The keyboard hook, the tray icon, the overlay

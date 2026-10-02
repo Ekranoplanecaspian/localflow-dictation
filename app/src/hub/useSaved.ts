@@ -43,3 +43,19 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 function same(a: unknown, b: unknown): boolean {
     return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
+
+/**
+ * `local` with the fields a refused save tried to change put back to their saved values.
+ *
+ * A save is applied on screen before it is sent. Refused, its value used to stay until the next
+ * refresh replaced it; since `useSaved` keeps unsaved edits through refreshes, it stayed for good -
+ * and pages that save the whole settings object sent it again with every later change, so each
+ * of those was refused too.
+ */
+export function revert<T extends object>(local: T, saved: T, patch: Partial<T>): T {
+    const out = { ...local };
+    for (const field of Object.keys(patch) as (keyof T)[]) {
+        out[field] = saved[field];
+    }
+    return out;
+}

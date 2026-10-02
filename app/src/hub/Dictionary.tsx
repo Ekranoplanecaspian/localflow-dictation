@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { PostProcess, SectionProps } from "./types";
-import { useSaved } from "./useSaved";
+import { revert, useSaved } from "./useSaved";
 
 /** Key-value editor shared by exact replacements and snippets. */
 function Pairs({
@@ -91,6 +91,7 @@ export function Dictionary({ data, onChange, say }: SectionProps) {
             say("saved");
             window.setTimeout(onChange, 300);
         } catch (e) {
+            setDraft((d) => revert(d, saved, patch));
             say(String(e));
         }
     };

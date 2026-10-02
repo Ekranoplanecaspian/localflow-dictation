@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppRule, SectionProps, Settings } from "./types";
-import { useSaved } from "./useSaved";
+import { revert, useSaved } from "./useSaved";
 
 /**
  * Per-application rules.
@@ -71,6 +71,8 @@ export function Apps({ data, onChange, say }: SectionProps) {
             say("saved");
             void onChange();
         } catch (e) {
+            // Refused: back to the saved rules, or every later change here is refused with it.
+            setSettings((s) => revert(s, data.settings, { app_rules: rules }));
             say(String(e));
         }
     };

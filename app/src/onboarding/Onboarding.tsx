@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { pretty, useChordCapture } from "../hub/useChordCapture";
 import { formatEta, formatSize } from "../hub/downloads";
 import { Progress } from "../hub/ModelPicker";
@@ -73,10 +74,21 @@ function Level({ onHeard }: { onHeard: () => void }) {
     const fill = useRef<HTMLSpanElement>(null);
     // The shell sends levels only while dictating, unless a screen like this one asks: without
     // this the bar stayed still however loudly the user spoke.
+    // Renewed every second while the window can be seen: closing it hides it rather than
+    // unmounting this, and the shell lets the meter lapse a few seconds after the last renewal.
     useEffect(() => {
         if (!("__TAURI_INTERNALS__" in window)) return; // the browser demo has no microphone
-        void invoke("level_meter", { on: true }).catch(() => {});
-        return () => void invoke("level_meter", { on: false }).catch(() => {});
+        const win = getCurrentWindow();
+        const renew = async () => {
+            if (document.hidden || !(await win.isVisible().catch(() => true))) return;
+            void invoke("level_meter", { on: true }).catch(() => {});
+        };
+        void renew();
+        const timer = window.setInterval(() => void renew(), 1000);
+        return () => {
+            window.clearInterval(timer);
+            void invoke("level_meter", { on: false }).catch(() => {});
+        };
     }, []);
     useEffect(
         () =>

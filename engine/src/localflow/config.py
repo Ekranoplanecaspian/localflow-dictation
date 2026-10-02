@@ -137,7 +137,18 @@ class Config:
             log.info("Wrote default config to %s", path)
             return cfg
         try:
-            data = json.loads(path.read_text(encoding="utf-8-sig"))  # -sig: a byte-order mark is not an error
+            text = path.read_text(encoding="utf-8-sig")  # -sig: a byte-order mark is not an error
+        except OSError as e:
+            # Open elsewhere without sharing (an antivirus scan, an editor), or otherwise
+            # unreadable this instant. This used to stop the engine at start-up. The defaults
+            # are used until the next start, and nothing is saved over the user's file.
+            log.error("%s could not be read (%s); starting with default settings, and not saving "
+                      "over it", path, e)
+            cfg = cls()
+            cfg.keep_file = True
+            return cfg
+        try:
+            data = json.loads(text)
             if not isinstance(data, dict):
                 raise ValueError(f"expected a JSON object, found {type(data).__name__}")
             migrated = migrate(data)
@@ -163,9 +174,16 @@ class Config:
             # the broken file beside it: the dictionary and snippets in it are the user's own
             # work, and may well be recoverable.
             aside = _set_aside(path)
-            log.error("%s could not be read (%s); starting with default settings. The unreadable "
-                      "file was kept as %s.", path, e, aside or "(could not be moved)")
             cfg = cls()
+            if aside is None:
+                # It could not be moved out of the way, so saving the defaults would go over it -
+                # and with it the user's dictionary and snippets. Left alone, in place.
+                log.error("%s could not be read (%s) or moved aside; starting with default settings, "
+                          "and not saving over it", path, e)
+                cfg.keep_file = True
+                return cfg
+            log.error("%s could not be read (%s); starting with default settings. The unreadable "
+                      "file was kept as %s.", path, e, aside)
             cfg.save(path)
             return cfg
         if migrated is not data:
@@ -174,13 +192,19 @@ class Config:
 
     # Not a setting: the settings version of the file, when a newer LocalFlow wrote it.
     newer: int | None = field(default=None, repr=False, compare=False)
+    # Not a setting: the file could not be read and is still there; saving would replace it.
+    keep_file: bool = field(default=False, repr=False, compare=False)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         if self.newer:
             log.info("not saving settings: %s belongs to a newer LocalFlow", path.name)
             return
+        if self.keep_file:
+            log.info("not saving settings: %s could not be read, and is left as it is", path.name)
+            return
         data = asdict(self)
         data.pop("newer", None)
+        data.pop("keep_file", None)
         _restore_pinned(self, data)
         write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
 
